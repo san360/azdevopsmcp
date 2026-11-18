@@ -1,0 +1,95 @@
+# =====================================================================================
+#  03 - Tool argument validation on the working setup (/ado-mcp-proxy/{{org}})
+#
+#  A valid call, then calls the gateway rejects before Azure DevOps sees them.
+#  Needs a token (environment variable "token", or a token from 02 step 6).
+#  Design and limits: docs/TOOL-VALIDATION.md.
+#
+#  Every rejection is HTTP 200 + Content-Type application/json + header
+#  x-mcp-gateway-validation: rejected, with JSON-RPC error -32602 naming only the field
+#  and the violated rule (never the value). Logs: docs/kql/tool-validation.kql shows
+#  result "rejected" and reachedBackend false for each one.
+# =====================================================================================
+
+@mcpUrl = {{gateway}}/ado-mcp-proxy/{{org}}
+@bearer = {{token}}
+
+###
+# VALID - passes the curated schema and reaches Azure DevOps.
+# EXPECT: HTTP 200, text/event-stream, the user's projects.
+# @name valid
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":5}}}
+
+###
+# WRONG TYPE + UNKNOWN PROPERTY - "5" is a string; "query" is not in the schema.
+# EXPECT: {"jsonrpc":"2.0","id":11,"error":{"code":-32602,"message":"Invalid arguments for tool
+#          core_list_projects: top violates type; query violates additionalProperties. Rejected by the
+#          API gateway before reaching the server.","data":{"tool":"core_list_projects","violations":[
+#          {"field":"top","rule":"type"},{"field":"query","rule":"additionalProperties"}],"source":"api-gateway"}}}
+#         Without the gateway, the server accepts both.
+# @name typeAndUnknown
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":"5","query":1}}}
+
+###
+# MISSING REQUIRED FIELD - wit_work_item action "get" needs "id".
+# EXPECT: error -32602, violations [{"field":"id","rule":"required"}].
+# @name missingId
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"wit_work_item","arguments":{"action":"get"}}}
+
+###
+# BAD ENUM - "delete" is not one of the read actions.
+# EXPECT: error -32602, violations [{"field":"action","rule":"enum"}].
+# @name badEnum
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"wit_work_item","arguments":{"action":"delete","id":1}}}
+
+###
+# NEWER PROTOCOL - with MCP-Protocol-Version 2025-11-25 the same rejection comes back as a
+# tool execution error, so the model can correct itself (MCP 2025-11-25 tools spec).
+# EXPECT: {"jsonrpc":"2.0","id":14,"result":{"content":[{"type":"text","text":"Invalid arguments for
+#          tool core_list_projects: top violates maximum. ..."}],"isError":true}}
+# @name newerProtocol
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-11-25
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":500}}}
+
+###
+# BATCH - a JSON-RPC array (removed from MCP in 2025-06-18) could hide a tools/call.
+# EXPECT: error -32602 "JSON-RPC batch requests are not supported by this gateway.",
+#         data {"tool":"(batch)","violations":[{"field":"request","rule":"batch-not-allowed"}]},
+#         header x-mcp-gateway-validation: denied.
+# @name batch
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+[{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":5}}}]

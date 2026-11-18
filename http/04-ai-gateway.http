@@ -1,0 +1,89 @@
+# =====================================================================================
+#  04 - Azure AI Gateway (federated MCP server with an on-behalf-of backend)
+#  Background and setup: docs/AI-GATEWAY.md and infra/aigateway/main.bicep.
+#
+#  The same steps as 01/02, to show where AI Gateway differs: there is no OAuth
+#  discovery (steps 2-6 have nothing to call), the client must bring a token for AI
+#  Gateway itself, and the gateway exchanges it for an Azure DevOps token on behalf of
+#  the user.
+#
+#  Variables (environment file):
+#    aigwHost  = https://<ai-gateway-host>
+#    aigwToken = az account get-access-token --scope https://ai.gateway.azure.com/Data.All
+# =====================================================================================
+
+@aigwMcpUrl = {{aigwHost}}/default/toolservers/ado-obo/mcp
+
+###
+# STEP 1 - Anonymous initialize
+# EXPECT: HTTP 401, Content-Type application/json, NO WWW-Authenticate header:
+#           { "statusCode": 401, "message": "Unauthorized. Missing or invalid Entra ID token, or missing Data.All scope." }
+#         Without a challenge an MCP client cannot discover how to sign in.
+# @name init
+POST {{aigwMcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough","version":"1"}}}
+
+###
+# STEP 2 - Protected-resource metadata, where a client would look for it (RFC 9728)
+# EXPECT: HTTP 404 { "statusCode": 404, "message": "Resource not found" }.
+#         The same for /.well-known/oauth-authorization-server and /register, so steps 3-6
+#         do not exist here: clients such as Codex and Claude Code stop with
+#         "Dynamic client registration ... 404".
+# @name prm
+GET {{aigwHost}}/.well-known/oauth-protected-resource/default/toolservers/ado-obo/mcp
+Accept: application/json
+
+###
+# STEP 7 - Authenticated initialize with a gateway token (obtained outside MCP)
+# WHAT  : The token's audience is AI Gateway (scope Data.All), NOT Azure DevOps.
+# EXPECT: HTTP 200, serverInfo {"name":"Azure AI Gateway","version":"1.0.0"}: the gateway
+#         terminates MCP itself; Azure DevOps is a backend behind it.
+# @name initAuth
+POST {{aigwMcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Authorization: Bearer {{aigwToken}}
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough","version":"1"}}}
+
+###
+# STEP 8 - notifications/initialized
+# EXPECT: HTTP 202.
+# @name initialized
+POST {{aigwMcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{aigwToken}}
+
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+
+###
+# STEP 9 - tools/list
+# EXPECT: HTTP 200. Tool names carry the backend namespace: "ado_core_list_projects", ...
+#         (43 tools, or only those in the server's allow-list).
+# @name toolsList
+POST {{aigwMcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{aigwToken}}
+
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+
+###
+# STEP 10 - tools/call through the on-behalf-of exchange
+# EXPECT: HTTP 200, the signed-in user's projects: the gateway exchanged the AI Gateway
+#         token for an Azure DevOps MCP token of the same user.
+# STEP 11 - Change "top" to 500: AI Gateway does not validate arguments; the call goes through.
+# @name toolsCall
+POST {{aigwMcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{aigwToken}}
+
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ado_core_list_projects","arguments":{"top":5}}}

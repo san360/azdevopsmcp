@@ -1,0 +1,217 @@
+# =====================================================================================
+#  02 - WORKING: API Management HTTP proxy + OAuth compatibility ("working setup")
+#  /ado-mcp-proxy/{{org}}
+#
+#  The same steps as 01-not-working-native.http, in the same order. The differences:
+#    step 1  the challenge points at metadata APIM serves itself
+#    step 2  the PRM names APIM as the authorization server
+#    step 3  APIM's authorization-server metadata (with a registration endpoint)
+#    step 4  POST /register returns the pre-registered public client
+#    step 5  APIM's /authorize replaces "resource" and redirects to Entra: no error
+#    step 6  APIM's /token applies the same translation and returns the user's token
+#  Steps 5 (browser) and 6 (code) are manual; see http/README.md.
+#
+#  Variables (environment file): gateway, org, tenant, clientId, token.
+# =====================================================================================
+
+# Fixed, lab-only PKCE pair (RFC 7636). Never reuse a fixed verifier in a real client.
+@codeVerifier = lab-only-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz
+@codeChallenge = zaFp8oSoZN9fqMAEJGn4XTBBL02a9LeZix3gER7YRB4
+@redirectUri = http://localhost
+@mcpUrl = {{gateway}}/ado-mcp-proxy/{{org}}
+# Paste the "code" from the browser address bar after step 5 (manual, valid ~10 minutes).
+@authCode = paste-the-code-here
+# Token for steps 7-11. Default: the az token from your environment file. After a
+# successful step 6, use {{token6.response.body.$.access_token}} instead.
+@bearer = {{token}}
+
+###
+# STEP 1 - Anonymous initialize
+# WHAT  : The first MCP message, without a token.
+# WHY   : MCP authorization 2025-06-18: a 401 tells the client where the metadata is.
+# EXPECT: HTTP 401, and (proxy-mcp.xml outbound replaced the origin's challenge)
+#           WWW-Authenticate: Bearer resource_metadata="https://<gateway-host>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>", scope="https://mcp.dev.azure.com/.default"
+#           Cache-Control: no-store, X-Correlation-ID, x-apim-request-id
+#         Difference to native: the metadata URL is APIM's own document, and the
+#         challenge also names the scope (MCP 2025-11-25 recommends it).
+# LOGS  : policy-traces.kql steps proxy-inbound / proxy-outbound ("challenge points at
+#         APIM-hosted metadata"); www-authenticate-rewrite.kql.
+# @name init
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough","version":"1"}}}
+
+###
+# STEP 2 - Protected-resource metadata (served by oauth-prm.xml)
+# WHAT  : The document named in the challenge, at the RFC 9728 path-inserted location.
+# EXPECT: HTTP 200
+#           { "resource": "https://<gateway-host>/ado-mcp-proxy/<org>",   <- equals the URL the client uses
+#             "authorization_servers": [ "https://<gateway-host>" ],      <- APIM, not Entra
+#             "bearer_methods_supported": [ "header" ],
+#             "scopes_supported": [ "https://mcp.dev.azure.com/.default" ],
+#             "resource_name": "Azure DevOps MCP via API Management" }
+#         Difference to native: the authorization server is the gateway, so the client
+#         sends its authorize and token requests to APIM, which can translate them.
+# LOGS  : client-signins.kql / policy-traces.kql, step prm.
+# @name prm
+GET {{gateway}}/.well-known/oauth-protected-resource/ado-mcp-proxy/{{org}}
+Accept: application/json
+
+###
+# STEP 3 - Authorization-server metadata (served by oauth-as-metadata.xml)
+# WHAT  : RFC 8414 metadata of the authorization server from step 2 (response chaining).
+# EXPECT: HTTP 200
+#           { "issuer": "https://<gateway-host>",
+#             "authorization_endpoint": "https://<gateway-host>/authorize",
+#             "token_endpoint": "https://<gateway-host>/token",
+#             "registration_endpoint": "https://<gateway-host>/register",
+#             "code_challenge_methods_supported": [ "S256" ], ... }
+#         issuer equals the URL it was fetched from (RFC 8414 section 3.3; Copilot CLI checks it).
+# LOGS  : step as-metadata.
+# @name asMetadata
+GET {{prm.response.body.$.authorization_servers[0]}}/.well-known/oauth-authorization-server
+Accept: application/json
+
+###
+# STEP 4 - Dynamic client registration (oauth-register.xml)
+# WHAT  : The client registers itself, as most MCP clients do (RFC 7591).
+# WHY   : Entra has no registration endpoint; APIM answers with the one pre-registered
+#         public client and echoes the redirect URIs. Entra still enforces them.
+# EXPECT: HTTP 201
+#           { "client_id": "<public-client-id>", "client_name": "http-walkthrough",
+#             "redirect_uris": [ "http://localhost" ], "token_endpoint_auth_method": "none", ... }
+# LOGS  : client-signins.kql, step register (clientName, redirectUris).
+# @name register
+POST {{asMetadata.response.body.$.registration_endpoint}}
+Content-Type: application/json
+
+{"client_name":"http-walkthrough","redirect_uris":["{{redirectUri}}"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}
+
+###
+# STEP 5 - Authorization request through APIM (oauth-authorize.xml)
+# WHAT  : The same request as native step 5, but sent to APIM's /authorize, still with
+#         resource = the gateway URL, exactly as a client builds it.
+# WHY   : APIM removes "resource" and adds resource=https://mcp.dev.azure.com, the
+#         identifier Entra accepts for the Azure DevOps scope. PKCE S256 is required.
+# EXPECT: HTTP 302, Location:
+#           https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize?client_id=...
+#             &redirect_uri=http%3A%2F%2Flocalhost&scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
+#             &code_challenge=...&code_challenge_method=S256&state=walkthrough-proxy
+#             &resource=https%3A%2F%2Fmcp.dev.azure.com          <- replaced
+#         Difference to native: no invalid_target. Entra serves its sign-in page.
+# MANUAL: Copy the Location value into a browser and sign in with an account of the
+#         organization's tenant. The browser then goes to
+#           http://localhost/?code=<long value>&state=walkthrough-proxy
+#         and shows "can't connect": nothing listens on localhost, that is expected.
+#         Copy the code value from the address bar into @authCode above.
+# LOGS  : client-signins.kql, step authorize (redirectUri, clientResource = the gateway URL).
+# @name authorize
+# @no-redirect
+GET {{asMetadata.response.body.$.authorization_endpoint}}
+    ?client_id={{register.response.body.$.client_id}}
+    &response_type=code
+    &redirect_uri={{redirectUri}}
+    &scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
+    &resource={{mcpUrl}}
+    &code_challenge={{codeChallenge}}
+    &code_challenge_method=S256
+    &state=walkthrough-proxy
+
+###
+# STEP 6 - Token request through APIM (oauth-token.xml)  [needs @authCode from step 5]
+# WHAT  : Exchanges the code for tokens (RFC 6749 section 4.1.3), with the PKCE verifier
+#         and resource = the gateway URL, as a client sends it.
+# WHY   : APIM replaces resource again and forwards the form to Entra's token endpoint.
+# EXPECT: HTTP 200
+#           { "token_type": "Bearer", "scope": "https://mcp.dev.azure.com/Ado.Mcp.Tools ...",
+#             "expires_in": 3600-ish, "access_token": "eyJ...", "refresh_token": "..." }
+#         The access token's audience is Azure DevOps MCP and it belongs to the user.
+#         Then set @bearer = {{token6.response.body.$.access_token}} above.
+#         Without a real code (the placeholder) Entra answers 400 invalid_grant, AADSTS9002313;
+#         an already used or expired code gives invalid_grant AADSTS54005 / AADSTS70008.
+# SHORTCUT: skip steps 5-6 and use the az token from the environment file (@bearer = {{token}}).
+# LOGS  : client-signins.kql, steps token and token-response (status only; tokens are never logged).
+# @name token6
+POST {{asMetadata.response.body.$.token_endpoint}}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&client_id={{register.response.body.$.client_id}}
+&code={{authCode}}
+&redirect_uri={{redirectUri}}
+&code_verifier={{codeVerifier}}
+&resource={{mcpUrl}}
+
+###
+# STEP 7 - Authenticated initialize
+# EXPECT: HTTP 200, text/event-stream (REST Client shows the raw "event: message / data: {...}"
+#         text), serverInfo AzureDevOps.Mcp, protocolVersion 2025-06-18. No Mcp-Session-Id.
+#         X-Correlation-ID and x-apim-request-id come back for log lookups.
+# LOGS  : policy-traces.kql step proxy-inbound shows mcpMethod initialize, the organization,
+#         the user's oid and the client app id (azp) of the token.
+# @name initAuth
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough","version":"1"}}}
+
+###
+# STEP 8 - notifications/initialized
+# EXPECT: HTTP 202, empty body.
+# @name initialized
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+
+###
+# STEP 9 - tools/list
+# EXPECT: HTTP 200, SSE with 26 read-only tools (X-MCP-Readonly: true from mcp-backend-headers).
+# @name toolsList
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+
+###
+# STEP 10 - tools/call (read-only)
+# EXPECT: HTTP 200, SSE. data: {"result":{"content":[{"type":"text","text":"[{\"id\":\"<project-id>\",\"name\":\"<project>\",...}]"}]},"id":3,...}
+#         The tool-validation fragment checked the arguments first (trace result "passed").
+# LOGS  : tool-validation.kql (result passed, reachedBackend true).
+# @name toolsCall
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":5}}}
+
+###
+# STEP 11 - tools/call with an invalid argument (rejected by the gateway)
+# WHAT  : top is outside the curated schema (1-100). More cases: 03-tool-validation.http.
+# EXPECT: HTTP 200, Content-Type: application/json (not SSE: the gateway answers itself),
+#         header x-mcp-gateway-validation: rejected, body
+#           {"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid arguments for tool
+#            core_list_projects: top violates maximum. Rejected by the API gateway before reaching
+#            the server.","data":{"tool":"core_list_projects","violations":[{"field":"top","rule":"maximum"}],"source":"api-gateway"}}}
+#         Compare native step 11: there the server simply accepts top: 500.
+# LOGS  : tool-validation.kql (result rejected, reachedBackend false).
+# @name toolsCallInvalid
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":500}}}

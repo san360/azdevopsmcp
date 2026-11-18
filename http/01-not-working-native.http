@@ -1,0 +1,171 @@
+# =====================================================================================
+#  01 - NOT WORKING: native API Management MCP pass-through ("regular setup")
+#  /ado-mcp-native/{{org}}
+#
+#  Walk the requests top to bottom: they are the steps a real MCP client (VS Code,
+#  Claude Code with a client ID) performs. The flow ends at step 5 with Entra error
+#  AADSTS9010010: this is the reported sign-in failure. Steps 7-10 show that the MCP
+#  traffic itself works when a token is obtained some other way.
+#
+#  Variables come from the environment file (see http/README.md):
+#    gateway  = https://<gateway-host>    org = <organization>
+#    tenant   = <tenant-id>               clientId = <public-client-id>
+#    token    = an Azure DevOps MCP token (only for steps 7-10)
+#  Compare each step with 02-working-proxy.http: the step numbers line up.
+# =====================================================================================
+
+# Fixed, lab-only PKCE pair (RFC 7636). Never reuse a fixed verifier in a real client.
+@codeVerifier = lab-only-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz
+@codeChallenge = zaFp8oSoZN9fqMAEJGn4XTBBL02a9LeZix3gER7YRB4
+@redirectUri = http://localhost
+@mcpUrl = {{gateway}}/ado-mcp-native/{{org}}
+
+###
+# STEP 1 - Anonymous initialize
+# WHAT  : The first MCP message (JSON-RPC "initialize"), sent without a token.
+# WHY   : A client learns that authorization is needed only when the server answers 401
+#         (MCP authorization 2025-06-18, "Authorization Server Discovery").
+# EXPECT: HTTP 401, no body, and
+#           WWW-Authenticate: Bearer resource_metadata="https://<gateway-host>/ado-mcp-native/.well-known/oauth-protected-resource/<org>"
+#         The origin's challenge pointed at mcp.dev.azure.com. APIM's native pass-through
+#         REWROTE it to the gateway (built in, cannot be changed by policy).
+# LOGS  : x-apim-request-id response header; docs/kql/www-authenticate-rewrite.kql shows
+#         the origin challenge next to the rewritten one.
+# @name init
+# @no-redirect
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough","version":"1"}}}
+
+###
+# STEP 2 - Protected-resource metadata (PRM)
+# WHAT  : Reads the document the resource_metadata URL from step 1 points to.
+# WHY   : RFC 9728: the PRM names the protected resource ("resource"), its scopes and its
+#         authorization server(s). Clients check that "resource" equals the URL they used.
+# EXPECT: HTTP 200
+#           { "resource": "https://<gateway-host>/ado-mcp-native/<org>",            <- rewritten by APIM
+#             "authorization_servers": [ "https://login.microsoftonline.com/<tenant-id>/v2.0" ],
+#             "bearer_methods_supported": [ "header" ],
+#             "scopes_supported": [ "https://mcp.dev.azure.com/.default" ] }       <- NOT rewritten
+#         The resource is the gateway, but the scope belongs to Azure DevOps: this
+#         combination is what Entra rejects in step 5.
+# LOGS  : policy-traces.kql, step native-inbound for this path.
+# @name prm
+GET {{gateway}}/ado-mcp-native/.well-known/oauth-protected-resource/{{org}}
+Accept: application/json
+
+###
+# STEP 3 - Authorization-server metadata
+# WHAT  : Reads Entra's OpenID configuration, the authorization server named in the PRM.
+# WHY   : RFC 8414 / OpenID Connect Discovery: the client needs the authorize and token
+#         endpoints. The URL is built from step 2 (response chaining).
+# EXPECT: HTTP 200 with "authorization_endpoint": ".../<tenant-id>/oauth2/v2.0/authorize",
+#         "token_endpoint", and NO "registration_endpoint" (Entra has no dynamic client
+#         registration). Clients that need DCR (Claude Code, MCP Inspector) stop here with
+#         "Incompatible auth server: does not support dynamic client registration".
+# @name asMetadata
+GET {{prm.response.body.$.authorization_servers[0]}}/.well-known/openid-configuration
+Accept: application/json
+
+###
+# STEP 4 - Client registration
+# There is nothing to call: Entra has no registration endpoint. A client continues only
+# if it was configured with a client ID ({{clientId}}, the public client created by
+# scripts/setup-entra.ps1). In 02-working-proxy.http this step is POST /register.
+
+###
+# STEP 5 - Authorization request: THE FAILURE
+# WHAT  : The URL a client opens in the browser to sign the user in, built as the MCP
+#         spec requires: scope from the PRM, and resource = the PRM "resource" (RFC 8707).
+# WHY   : RFC 8707 resource indicators bind the token to the resource from step 2.
+# EXPECT: HTTP 302 straight away, before any sign-in page. Location:
+#           http://localhost/?error=invalid_target&error_description=AADSTS9010010: The resource
+#           parameter provided in the request doesn't match with the requested scopes. ...
+#         Entra refuses a gateway URL as resource for an Azure DevOps scope.
+#         Try it: change resource to https://mcp.dev.azure.com and Entra answers 200 with
+#         its sign-in page instead. That is the translation the working setup does.
+# LOGS  : Entra sign-in logs (no gateway call happens in this step).
+# @name authorize
+# @no-redirect
+GET https://login.microsoftonline.com/{{tenant}}/oauth2/v2.0/authorize
+    ?client_id={{clientId}}
+    &response_type=code
+    &redirect_uri={{redirectUri}}
+    &scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
+    &resource={{mcpUrl}}
+    &code_challenge={{codeChallenge}}
+    &code_challenge_method=S256
+    &state=walkthrough-native
+
+###
+# STEP 6 - Token: not possible on this setup
+# Sign-in stopped in step 5, so there is no code to exchange. To prove the rest of the
+# MCP traffic works, steps 7-10 use a token obtained outside the MCP flow:
+#   az account get-access-token --scope https://mcp.dev.azure.com/.default --query accessToken -o tsv
+# Put it in the "token" variable of your private environment file (never commit it).
+
+###
+# STEP 7 - Authenticated initialize
+# WHAT  : The same initialize as step 1, now with the user's Azure DevOps MCP token.
+# WHY   : MCP lifecycle: initialize negotiates the protocol version and capabilities.
+# EXPECT: HTTP 200, Content-Type: text/event-stream. REST Client shows the raw SSE text:
+#           event: message
+#           data: {"result":{"protocolVersion":"2025-06-18",...,"serverInfo":{"name":"AzureDevOps.Mcp",...}},"id":1,"jsonrpc":"2.0"}
+#         The Azure DevOps server issues no Mcp-Session-Id header (it is stateless), so
+#         later requests need no session header.
+# LOGS  : mcp-methods.kql (ApiManagementGatewayMCPLog) shows the JSON-RPC method.
+# @name initAuth
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Authorization: Bearer {{token}}
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough","version":"1"}}}
+
+###
+# STEP 8 - notifications/initialized
+# WHAT  : Tells the server the client finished initialization. A notification has no id.
+# WHY   : MCP lifecycle, "Initialization".
+# EXPECT: HTTP 202 Accepted, empty body.
+# @name initialized
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{token}}
+
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+
+###
+# STEP 9 - tools/list
+# WHAT  : Discovers the tools the server offers.
+# WHY   : MCP "Tools": clients call tools/list before tools/call.
+# EXPECT: HTTP 200, SSE. data: {"result":{"tools":[{"name":"core_list_projects",...},...]}...}
+#         26 read-only tools, because the gateway sends X-MCP-Readonly: true.
+# @name toolsList
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{token}}
+
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+
+###
+# STEP 10 - tools/call (read-only)
+# WHAT  : Runs core_list_projects as the signed-in user.
+# EXPECT: HTTP 200, SSE. data: {"result":{"content":[{"type":"text","text":"[{\"id\":\"<project-id>\",\"name\":\"<project>\",...}]"}]},"id":3,...}
+#         The data plane works and Azure DevOps sees the real user. Only sign-in is broken.
+# STEP 11 (validation) - On this API, top: 500 is NOT rejected by the gateway (native MCP
+#         APIs cannot run validate-content). Change "top" to 500 and the server answers.
+# LOGS  : mcp-calls-app-insights.kql (gen_ai.tool.name per call).
+# @name toolsCall
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{token}}
+
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":5}}}

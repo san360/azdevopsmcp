@@ -23,3 +23,8 @@ infra/*.json
 
 # Internal material (customer email, internal links, unsanitized lab captures). Never commit.
 internal/
+
+# HTTP walkthrough environments with real values and tokens (commit only the .example file).
+http-client.env.json
+http-client.private.env.json
+.vscode/settings.json

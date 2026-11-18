@@ -57,6 +57,7 @@ the gateway the same way.
 | 1 | This README | What the problem is, why a gateway, how both setups work (10 minutes) |
 | 2 | [Getting started](docs/GETTING-STARTED.md) | Deploy the lab step by step, with expected output |
 | 3 | [Testing](docs/TESTING.md) | Probe, raw protocol with curl/PowerShell, logs, validation tests |
+| 3a | [Step-by-step `.http` walkthroughs](http/README.md) | Every request of the sign-in and MCP flow, native vs. working, side by side |
 | 4 | [Client guides](docs/clients/README.md) | VS Code, GitHub Copilot CLI, OpenAI Codex CLI, Claude Code, MCP Inspector |
 | 5 | [What APIM changes for clients](docs/CLIENTS-APIM-CHANGES.md) | Each gateway change: client behaviour, the error without it, before/after, how to verify |
 | 6 | [Policies](docs/POLICIES.md) | Every APIM policy, element by element |
@@ -396,6 +397,7 @@ tools/query_logs.py                run docs/kql/*.kql from the command line
 tools/probe.example.json           copy to probe.local.json (gitignored)
 tools/tests/                       unit and loopback tests for the probe
 docs/GETTING-STARTED.md            deploy step by step, with expected output
+http/                              step-by-step .http walkthroughs (REST Client, httpYac, JetBrains)
 docs/TESTING.md                    probe, raw protocol, logs, validation tests
 docs/clients/                      one guide per MCP client (VS Code, Copilot CLI, Codex, Claude Code, Inspector)
 docs/CLIENTS-APIM-CHANGES.md       what APIM changes for each client, and why

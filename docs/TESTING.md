@@ -67,6 +67,11 @@ python -m unittest discover -s tools/tests -v
 
 ## 2. curl / PowerShell (raw protocol)
 
+Prefer clicking through? The [`http/`](../http/README.md) folder has the same flow as
+`.http` files for VS Code REST Client, one request per step with explanations, for the
+native and the working setup side by side.
+
+
 ```powershell
 $gw  = 'https://<gateway>'
 $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'

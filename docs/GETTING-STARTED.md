@@ -197,6 +197,10 @@ Pick one client from [docs/clients](clients/README.md). VS Code is the quickest:
 *"List the Azure DevOps projects I can access."* Then add the native URL and watch the
 sign-in fail with `AADSTS9010010`. That is the reported problem, reproduced.
 
+To see every request of the sign-in and MCP flow one by one, open the
+[`.http` walkthroughs](../http/README.md): `01-not-working-native.http` ends at the
+`AADSTS9010010` failure, `02-working-proxy.http` reaches a successful `tools/call`.
+
 ## 7. Look at the logs
 
 Wait 2–5 minutes, then:
