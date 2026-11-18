@@ -44,7 +44,7 @@ regions. The resource provider already offers the GA API version in 16 regions.
 flowchart LR
     subgraph apim["This repository: API Management (working setup)"]
         direction LR
-        c1["MCP client"] -->|"1 401 + PRM (APIM)"| a1["APIM proxy<br/>+ OAuth endpoints"]
+        c1["MCP client"] -->|"1 401 + PRM (APIM)"| a1["APIM MCP server<br/>+ OAuth endpoints"]
         c1 -->|"2 sign-in via APIM /authorize<br/>resource translated"| e1["Entra ID"]
         e1 -->|"3 user token for Azure DevOps MCP"| c1
         c1 -->|"4 Bearer user token"| a1 -->|"same token"| o1["Azure DevOps MCP"]
@@ -64,8 +64,8 @@ flowchart LR
 | Token the client holds | Azure DevOps MCP token (audience Azure DevOps) | AI Gateway token (audience `ai.gateway.azure.com`) |
 | Token Azure DevOps receives | The client's token, unchanged | A new token from an OBO exchange, still the user |
 | How the client gets its token | Standard MCP OAuth discovery, served by APIM policies | Outside MCP: Azure CLI, MSAL code, or a pasted token. No discovery |
-| MCP handling | Transparent HTTP proxy; the server's tool names and sessions | Gateway terminates MCP and federates tools; names get a namespace prefix |
-| Governance | APIM policy XML (fragments, named values, `validate-content`) | Typed policies, tool allow-list and block-list, agent hooks |
+| MCP handling | APIM MCP server (native pass-through); the server's tool names and sessions | Gateway terminates MCP and federates tools; names get a namespace prefix |
+| Governance | APIM policy XML (fragments, named values); argument validation possible only as an optional add-on, not deployed ([TOOL-VALIDATION.md](TOOL-VALIDATION.md)) | Typed policies, tool allow-list and block-list, agent hooks |
 
 ## Requirement matrix
 
@@ -214,7 +214,7 @@ acceptable for automation and agents, but not as an end-user sign-in experience 
 | OAuth compatibility endpoints | None; clients need a gateway token from elsewhere |
 | `mcp-org-validation`, allow-list of organizations | One registered MCP server per allowed organization |
 | `X-MCP-Readonly` / `X-MCP-Toolsets` | Tool allow-list (`allowList`) |
-| `mcp-tool-validation` | `preToolCall` agent hook (custom service) |
+| Tool argument validation (optional, not deployed here) | `preToolCall` agent hook (custom service) |
 | Rate limit per IP | `requestRateLimit` per identity or IP |
 | App Insights `<trace>` + `ApiManagementGatewayLogs` | OTLP telemetry exporter |
 

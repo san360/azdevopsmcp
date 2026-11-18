@@ -1,12 +1,15 @@
 # GitHub Copilot CLI
 
-Tested with Copilot CLI 1.0.113 on Windows (lab, 2026-11-18).
+Tested with Copilot CLI 1.0.113 on Windows (lab, 2026-11-18); re-verified with 1.0.114 on
+the current layout of the working setup (an APIM MCP server, everything under
+`/ado-mcp-proxy`): interactive `/mcp` sign-in, then `copilot -p` called `core_list_projects`
+through the MCP server and listed the project.
 
 ## How it signs in (observed)
 
 | Step | Behaviour |
 |---|---|
-| Discovery | `POST initialize` → reads `resource_metadata` and `scope` from the `401` `WWW-Authenticate` header |
+| Discovery | `POST initialize` → reads `resource_metadata` from the `401` `WWW-Authenticate` header (`/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>`; the header has no `scope`), then the path-inserted authorization-server metadata alias (observed) |
 | Client ID | Dynamic client registration, `client_name` `GitHub Copilot CLI` |
 | Redirect URI | `http://127.0.0.1:<random port>/` (Entra registration: `http://127.0.0.1/`) |
 | `resource` | Sends the gateway URL; APIM replaces it ([change 4](../CLIENTS-APIM-CHANGES.md#change-4-authorize-translates-the-resource-name)) |
@@ -44,8 +47,9 @@ copilot --additional-mcp-config "@$env:TEMP\ado-mcp\copilot-mcp.json"
 ```
 
 1. Type `/mcp`, select `ado_proxy` and sign in. The browser opens Microsoft Entra **via the
-   gateway's `/authorize`**. Sign in with the organization's tenant account.
-   Expected: `ado_proxy — connected`.
+   gateway's `/ado-mcp-proxy/oauth/authorize`**. Sign in with the organization's tenant
+   account. If the default browser profile is the wrong account, copy the sign-in URL into
+   the right profile. Expected: `ado_proxy — connected`.
 2. Optional, regular setup: select `ado_native` and sign in. Expected in the lab:
    `Signing in with your Microsoft Entra account (account broker)…` then connected. This is
    Copilot CLI's built-in Entra support, not the gateway (see
@@ -56,17 +60,19 @@ copilot --additional-mcp-config "@$env:TEMP\ado-mcp\copilot-mcp.json"
 
 ```powershell
 copilot --additional-mcp-config "@$env:TEMP\ado-mcp\copilot-mcp.json" --disable-builtin-mcps `
-  -p "Use only the ado_proxy MCP server. Call core_list_projects with no arguments and print the project names. Then call core_list_projects with top set to 500 and print the exact error." `
+  -p "Use only the ado_proxy MCP server. Call core_list_projects with no arguments and print the project names." `
   --allow-tool ado_proxy
 ```
 
-Expected (lab):
+Expected (lab): a `core_list_projects` call, then the project names.
 
 ```text
 ● core_list_projects  [{"id":"<project-id>","name":"<project>",...
-✗ core_list_projects  MCP server 'ado_proxy': Invalid arguments for tool core_list_projects: top violates maximum.
-  Rejected by the API gateway before reaching the server.
 ```
+
+The gateway does not validate tool arguments any more, so a call with `top` set to 500 is
+accepted by the server and returns projects; no *Rejected by the API gateway* error is
+expected ([TOOL-VALIDATION.md](../TOOL-VALIDATION.md)).
 
 With `ado_native` in `-p` mode the lab returned *MCP server "ado_native" requires
 authentication*: the broker sign-in is not reused headless.

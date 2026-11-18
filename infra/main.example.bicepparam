@@ -10,10 +10,6 @@ param createApim = false
 param readOnly = true
 param toolsets = ''
 param mcpRequestBodyBytes = 4096
-// Working setup: validate tools/call arguments of vetted tools (infra/schemas/tools/*.json).
-param toolValidation = true
-// 'allow' lets tools without a gateway schema through; 'deny' rejects them.
-param unlistedToolAction = 'allow'
 // Working setup: organizations accepted in {gateway}/ado-mcp-proxy/{org}; [] accepts any.
 param allowedOrganizations = [
   'example-organization'

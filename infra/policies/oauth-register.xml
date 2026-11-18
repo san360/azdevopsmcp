@@ -3,7 +3,8 @@
   PURPOSE : Dynamic client registration (DCR) compatibility. Every MCP client that
             registers gets the same pre-registered Entra public client id, because
             Microsoft Entra has no registration endpoint.
-  RUNS ON : API "ado-mcp-oauth-compat", operation POST /register. Called after the
+  RUNS ON : API "ado-mcp-proxy-oauth" (path ado-mcp-proxy/oauth), operation
+            POST /register. Called after the
             authorization-server metadata by clients without a configured client
             id (Codex, Claude Code, GitHub Copilot CLI, VS Code, MCP Inspector).
   INPUT   : RFC 7591 JSON, typically client_name, redirect_uris, grant_types,

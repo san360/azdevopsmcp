@@ -69,6 +69,24 @@ class ParsingTests(unittest.TestCase):
         self.assertTrue(probe.prm_matches({"resource": "HTTPS://GW.example/api/"}, "https://gw.example/api"))
         self.assertFalse(probe.prm_matches({"resource": "https://mcp.dev.azure.com"}, "https://gw.example/api"))
 
+    def test_oauth_isolation(self):
+        url = "https://gw.example/ado-mcp-proxy/org"
+        scoped = {"issuer": "https://gw.example/ado-mcp-proxy/oauth",
+                  "authorization_endpoint": "https://gw.example/ado-mcp-proxy/oauth/authorize",
+                  "token_endpoint": "https://gw.example/ado-mcp-proxy/oauth/token",
+                  "registration_endpoint": "https://gw.example/ado-mcp-proxy/oauth/register"}
+        self.assertEqual(probe.oauth_isolation(url, scoped)[0], True)
+        root = {**scoped, "issuer": "https://gw.example", "token_endpoint": "https://gw.example/token"}
+        ok, detail = probe.oauth_isolation(url, root)
+        self.assertFalse(ok)
+        self.assertIn("token_endpoint=https://gw.example/token", detail)
+        # A sibling path that only shares the prefix text is not inside the setup.
+        self.assertFalse(probe.oauth_isolation(url, {**scoped, "issuer": "https://gw.example/ado-mcp-proxy-x"})[0])
+        entra = {"issuer": "https://login.microsoftonline.com/t/v2.0",
+                 "authorization_endpoint": "https://login.microsoftonline.com/t/oauth2/v2.0/authorize"}
+        self.assertIsNone(probe.oauth_isolation(url, entra)[0])
+        self.assertIsNone(probe.oauth_isolation("https://gw.example", scoped)[0])
+
     def test_classify_entra_rejection(self):
         location = ("http://localhost/?error=invalid_target&error_description=AADSTS9010010%3a+The+resource+"
                     "parameter+provided+in+the+request+doesn%27t+match")

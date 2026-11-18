@@ -7,8 +7,6 @@
 //   mcp-caller-identity    proxy-mcp.xml, native-mcp.xml            -
 //   mcp-backend-headers    proxy-mcp.xml, native-mcp.xml            mcp-readonly, mcp-toolsets
 //   mcp-response-headers   proxy-mcp.xml, native-mcp.xml, oauth-token.xml
-//
-// mcp-tool-validation is deployed by mcp-tool-validation.bicep (it needs schemas).
 
 param apimName string
 

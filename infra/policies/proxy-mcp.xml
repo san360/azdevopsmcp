@@ -1,34 +1,35 @@
 <!--
   POLICY  : proxy-mcp.xml (working setup; MCP data plane)
-  PURPOSE : Governed HTTP pass-through to the hosted Azure DevOps MCP server. It
-            forwards the caller's Entra token unchanged, so Azure DevOps authorizes
-            every call as the signed-in user; APIM only governs the edge.
-  RUNS ON : API "ado-mcp-proxy" (type http), all operations: POST/GET/DELETE on
-            {gateway}/ado-mcp-proxy/{org} and on {gateway}/ado-mcp-proxy (bare
+  PURPOSE : Policy of the working setup's APIM MCP server (native pass-through,
+            listed under "MCP servers"). It forwards the caller's Entra token
+            unchanged, so Azure DevOps authorizes every call as the signed-in
+            user; APIM only governs the edge.
+  RUNS ON : API "ado-mcp-proxy" (type mcp), every request to
+            {gateway}/ado-mcp-proxy/{org} and {gateway}/ado-mcp-proxy (bare
             endpoint, tools then take orgName). First call of every sign-in (401)
-            and every MCP message after it.
+            and every MCP message after it. The API has no operations.
   INPUT   : MCP Streamable HTTP request: JSON-RPC POST (initialize, tools/list,
             tools/call, notifications), or a body-less GET/DELETE.
-  OUTPUT  : Forwarded to https://mcp.dev.azure.com/{org}; the SSE response streams
-            back unbuffered. A 401 gets a WWW-Authenticate that points at
-            APIM-hosted PRM for this exact URL. Local answers: 400 (not HTTPS),
-            404 (unknown organization), 429 (rate limit), JSON-RPC error (tool
-            validation fragment).
-  WHY     : MCP authorization 2025-06-18 and RFC 9728: the challenge must lead the
-            client to metadata whose resource equals the URL it used and whose
-            authorization server accepts that resource. Streamable HTTP: SSE must
-            not be buffered, so never read context.Response.Body here.
+  OUTPUT  : Forwarded by APIM to https://mcp.dev.azure.com/{org}; the SSE
+            response streams back. APIM itself answers a 401 with
+            resource_metadata="{gateway}/ado-mcp-proxy/.well-known/oauth-protected-resource/{org}";
+            the API "ado-mcp-proxy-prm" (oauth-prm.xml) serves that URL, which is
+            what makes sign-in work. Local answers: 400 (not HTTPS), 404 (unknown
+            organization), 429 (rate limit).
+  WHY     : MCP authorization 2025-06-18 and RFC 9728: the metadata must name an
+            authorization server that accepts the gateway URL as resource; the
+            OAuth facade under /ado-mcp-proxy/oauth does. Streamable HTTP: never
+            read context.Response.Body here (it would buffer the SSE stream).
   VERIFY  : AppTraces steps proxy-inbound, proxy-outbound, proxy-error
-            (docs/kql/policy-traces.kql); challenge rewrite in
-            docs/kql/www-authenticate-rewrite.kql; failures in docs/kql/errors.kql.
+            (docs/kql/policy-traces.kql); failures in docs/kql/errors.kql.
   STEPS   : inbound 1 HTTPS only, 2 organization (fragment mcp-org-validation),
             3 correlation id, 4 MCP method, 5 caller (fragment mcp-caller-identity),
-            6 trace, 7 rate limit, 8 tool validation (fragment mcp-tool-validation),
-            9 backend headers (fragment mcp-backend-headers), 10 backend.
-            outbound: challenge rewrite, response headers (fragment
-            mcp-response-headers), trace. Fragments: infra/policies/fragments/.
-  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (BACKEND_ID, SCOPE,
-            RATE_LIMIT_CALLS, RATE_LIMIT_PERIOD, TOOL_VALIDATION).
+            6 trace, 7 rate limit, 8 backend headers (fragment mcp-backend-headers).
+            outbound: response headers (fragment mcp-response-headers), trace.
+            No tool-argument validation: validate-content needs API operations
+            and MCP servers have none (docs/TOOL-VALIDATION.md shows how to add it).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (RATE_LIMIT_CALLS,
+            RATE_LIMIT_PERIOD).
   DETAILS : docs/POLICIES.md
 -->
 <policies>
@@ -46,8 +47,9 @@
         </return-response>
       </when>
     </choose>
-    <!-- Organization: sets variable org, or answers 404 {"error":"unknown_organization"}
-         for a malformed or not allowed name (fragment, shared with oauth-prm.xml). -->
+    <!-- Organization: sets variable org (from the path after the API path), or
+         answers 404 {"error":"unknown_organization"} for a malformed or not
+         allowed name (fragment, shared with oauth-prm.xml). -->
     <set-variable name="org-404-body" value="json" />
     <include-fragment fragment-id="mcp-org-validation" />
     <!-- Reuse a caller's X-Correlation-ID only if it is a GUID (no log
@@ -83,10 +85,6 @@
          seconds, then 429 with Retry-After. Protects the backend and the user's
          Azure DevOps request budget. -->
     <rate-limit-by-key calls="__RATE_LIMIT_CALLS__" renewal-period="__RATE_LIMIT_PERIOD__" counter-key="@(&quot;ado-mcp|&quot; + context.Request.IpAddress)" retry-after-header-name="Retry-After" />
-    <!-- Tool validation slot: include-fragment mcp-tool-validation
-         (tool-validation.xml) or empty. It must run before forwarding so an
-         invalid tools/call never reaches Azure DevOps. -->
-    __TOOL_VALIDATION__
     <!-- Backend headers: strip spoofable forwarding, identity and trace headers;
          add X-MCP-Readonly / X-MCP-Toolsets from named values (fragment, shared
          with native-mcp.xml). -->
@@ -95,37 +93,14 @@
     <set-header name="X-Correlation-ID" exists-action="override">
       <value>@((string)context.Variables[&quot;correlation-id&quot;])</value>
     </set-header>
-    <!-- BACKEND_ID placeholder: the backend for https://mcp.dev.azure.com. APIM
-         appends the rest of the client path (/{org}), so one backend serves
-         every organization. -->
-    <set-backend-service backend-id="__BACKEND_ID__" />
   </inbound>
   <backend>
-    <!-- No base here on purpose. buffer-response false streams SSE events as
-         they arrive (buffering holds them until the stream ends).
-         follow-redirects false: never follow a redirect with the user's token.
-         240 s timeout for long tool calls. -->
-    <forward-request follow-redirects="false" buffer-response="false" timeout="240" />
+    <!-- The MCP server forwards to its backend (ado-mcp-origin, the bare host
+         https://mcp.dev.azure.com) and appends /{org} from the client path. -->
+    <base />
   </backend>
   <outbound>
     <base />
-    <!-- Origin 401: its challenge points at mcp.dev.azure.com metadata whose
-         resource does not match this URL, so replace it (see below). -->
-    <choose>
-      <when condition="@(context.Response.StatusCode == 401)">
-        <!-- Point MCP clients at APIM-hosted PRM for this exact URL (per
-             organization). The scope parameter (SCOPE placeholder) follows MCP
-             2025-11-25, which recommends it in the challenge; GitHub Copilot CLI
-             uses it. -->
-        <set-header name="WWW-Authenticate" exists-action="override">
-          <value>@{
-            var url = context.Request.OriginalUrl;
-            return "Bearer resource_metadata=\"" + url.Scheme + Uri.SchemeDelimiter + url.Host
-              + "/.well-known/oauth-protected-resource" + url.Path.TrimEnd('/') + "\", scope=\"__SCOPE__\"";
-          }</value>
-        </set-header>
-      </when>
-    </choose>
     <!-- Cache-Control: no-store and x-apim-request-id (fragment). -->
     <include-fragment fragment-id="mcp-response-headers" />
     <!-- Echo the correlation id for support and log lookup. -->
@@ -135,7 +110,7 @@
     <!-- Telemetry (AppTraces step proxy-outbound): status code per MCP method.
          Uses the status only, never context.Response.Body (would buffer SSE). -->
     <trace source="ado-mcp-proxy" severity="information">
-      <message>@("proxy outbound: " + (string)context.Variables["mcp-method"] + " status " + context.Response.StatusCode + (context.Response.StatusCode == 401 ? ", challenge points at APIM-hosted metadata" : ""))</message>
+      <message>@("proxy outbound: " + (string)context.Variables["mcp-method"] + " status " + context.Response.StatusCode)</message>
       <metadata name="step" value="proxy-outbound" />
       <metadata name="statusCode" value="@(context.Response.StatusCode.ToString())" />
       <metadata name="correlationId" value="@((string)context.Variables[&quot;correlation-id&quot;])" />

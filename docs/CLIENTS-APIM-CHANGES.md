@@ -12,15 +12,17 @@ the gateway. For each change you get:
 4. **Why it is safe**, and the spec it relates to.
 5. **How to verify it**: a command, the expected output, and a KQL query.
 
-The README's Diagram 2 numbers the same policies in request order. Here they are numbered by
-what clients need: Diagram 2 change 1 = change 6 here, 2 = 1, 3 = 2, 4 = 3, 5 = 4, 6 = 5, and
-Diagram 2 change 7 (forwarding the user's token unchanged) applies to every client alike.
-Changes 7–9 here are new for the command-line clients.
+The README's Diagram 2 uses the same change numbers. Changes 1–5 are the PRM and OAuth
+compatibility policies. Changes 6 and 7 are built into the APIM MCP server and need no
+policy; they are listed because clients depend on them. Changes 8–9 are outside the request
+path (Entra redirect URIs, diagnostics).
 
 Everything marked *observed* was seen in lab sign-ins on 2026-11-18 with Copilot CLI
-1.0.113, Codex CLI 0.167.0 and Claude Code 2.1.322. Anything not seen is marked
-*unverified*. Hostnames, tenants and IDs are placeholders. Unfamiliar terms are explained
-in [the glossary](GLOSSARY.md). Per-client setup steps are in [docs/clients](clients/README.md).
+1.0.113/1.0.114, Codex CLI 0.167.0 and Claude Code 2.1.322. On the current layout (the
+working setup as an APIM MCP server), Copilot CLI signed in and called a tool, Codex signed
+in, and Claude Code connected. Anything not seen is marked *unverified*. Hostnames, tenants
+and IDs are placeholders. Unfamiliar terms are explained in [the glossary](GLOSSARY.md).
+Per-client setup steps are in [docs/clients](clients/README.md).
 
 ## The idea in one paragraph
 
@@ -46,13 +48,13 @@ client. ⚠️ = safety net; the client did not need it in the lab, but versions
 
 | # | APIM change (file) | Copilot CLI | Codex CLI | Claude Code | VS Code |
 |---|---|---|---|---|---|
-| 1 | PRM per exact URL (`oauth-prm.xml`) | ✅ | ✅ found via path-inserted URL | ✅ checks `resource` = URL | ✅ checks `resource` = URL |
+| 1 | PRM for the exact URL (`oauth-prm.xml`, APIs `ado-mcp-proxy-prm` and alias `ado-mcp-proxy-discovery-prm`) | ✅ | ✅ found via path-inserted URL | ✅ checks `resource` = URL | ✅ checks `resource` = URL |
 | 2 | Authorization-server metadata, issuer = gateway (`oauth-as-metadata.xml`) | ✅ | ✅ | ✅ | ✅ |
 | 3 | Dynamic client registration answer (`oauth-register.xml`) | ✅ | ✅ | ✅ | ✅ |
 | 4 | `/authorize`: replace `resource`, add `scope` if missing, require PKCE (`oauth-authorize.xml`) | ✅ (scope ⚠️) | ✅ (scope ⚠️) | ✅ (scope ⚠️) | ✅ |
 | 5 | `/token`: same translation (`oauth-token.xml`) | ✅ | ✅ | ✅ | ✅ |
-| 6 | 401 challenge points to APIM metadata, with `scope` (`proxy-mcp.xml` outbound) | ✅ | ⚪ uses well-known URLs | ✅ | ✅ |
-| 7 | Body-less `GET`/`DELETE` must not fail (`tool-validation.xml` null guard) | ⚪ | ✅ | ⚪ | ⚪ |
+| 6 | 401 challenge points at the setup's own PRM URL (built into the MCP server; no policy, no `scope` parameter) | ✅ | ⚪ uses well-known URLs | ✅ | ✅ |
+| 7 | Body-less `GET`/`DELETE` must not fail (the MCP server answers `405`; no policy) | ⚪ | ✅ | ⚪ | ⚪ |
 | 8 | Redirect URIs on the Entra public client (`scripts/setup-entra.ps1`, not APIM) | `http://127.0.0.1/` | `http://127.0.0.1/callback/<id>` per URL | `http://localhost/callback` | `http://127.0.0.1:33418/` |
 | 9 | Diagnostics: User-Agent and sign-in details in logs (`mcp-proxy.bicep`, traces) | helps | helps | helps | helps |
 
@@ -66,7 +68,7 @@ What each client does differently, observed in the lab:
 | Redirect URI | `http://127.0.0.1:<random>/` | `http://127.0.0.1:<random>/callback/<id>` | `http://localhost:<random>/callback` | `http://127.0.0.1:33418/` |
 | Sends `resource` | Yes (gateway URL) | Yes (gateway URL) | Yes (gateway URL) | Yes (gateway URL) |
 | Sign-in command | `/mcp` in interactive mode | `codex mcp login <name>` | `claude mcp login <name>` or `/mcp` | **MCP: List Servers** → start |
-| Headless after sign-in (`-p`/`exec`) | ✅ proxy | ✅ | Not run (no model reachable in the lab) | n/a |
+| Headless after sign-in (`-p`/`exec`) | ✅ (re-verified on the current layout) | ✅ (on the earlier HTTP proxy layout) | Not run (no model reachable in the lab) | n/a |
 
 ## Diagram: where the clients differ
 
@@ -80,36 +82,36 @@ sequenceDiagram
     autonumber
     actor U as User (browser)
     participant C as CLI client
-    participant P as APIM proxy<br/>/ado-mcp-proxy/{org}
-    participant A as APIM OAuth endpoints<br/>/.well-known, /register,<br/>/authorize, /token
+    participant P as APIM MCP server<br/>/ado-mcp-proxy/{org}
+    participant A as APIM PRM + OAuth APIs<br/>/ado-mcp-proxy/.well-known/...<br/>/ado-mcp-proxy/oauth/...<br/>+ .well-known aliases
     participant E as Microsoft Entra ID
     participant O as Azure DevOps MCP
 
     alt Codex
         C->>P: GET /ado-mcp-proxy/{org} (no body, no token)
-        Note over P: Change 7: must answer 405, not 500
-        C->>A: GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org}
+        P-->>C: 405 from the MCP server (change 7: nothing to fix)
+        C->>A: GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org} (alias)
     else Copilot CLI, Claude Code, VS Code
         C->>P: POST initialize (no token)
-        P-->>C: 401 WWW-Authenticate: resource_metadata=..., scope=... (change 6)
-        C->>A: GET the resource_metadata URL
+        P-->>C: 401 resource_metadata={gateway}/ado-mcp-proxy/<br/>.well-known/oauth-protected-resource/{org} (change 6, built in)
+        C->>A: GET the resource_metadata URL (API ado-mcp-proxy-prm)
     end
-    A-->>C: PRM: resource = the URL the client used, authorization server = gateway (change 1)
-    C->>A: GET /.well-known/oauth-authorization-server
-    A-->>C: issuer = gateway, /authorize, /token, /register (change 2)
-    C->>A: POST /register {client_name, redirect_uris}
+    A-->>C: PRM: resource = the URL the client used,<br/>authorization server = {gateway}/ado-mcp-proxy/oauth (change 1)
+    C->>A: GET /.well-known/oauth-authorization-server/ado-mcp-proxy/oauth (alias)
+    A-->>C: issuer = {gateway}/ado-mcp-proxy/oauth, its authorize, token, register (change 2)
+    C->>A: POST /ado-mcp-proxy/oauth/register {client_name, redirect_uris}
     A-->>C: the pre-registered Entra public client ID (change 3)
     Note over C: Redirect URI differs: Copilot 127.0.0.1:{port}/ ·<br/>Codex 127.0.0.1:{port}/callback/{id} · Claude localhost:{port}/callback
     C->>U: open browser
-    U->>A: GET /authorize ... resource={gateway URL}
-    A-->>U: 302 to Entra with resource=https://mcp.dev.azure.com (change 4)
+    U->>A: GET /ado-mcp-proxy/oauth/authorize ... resource={gateway URL}
+    A-->>U: 302 to Entra with resource=https://mcp.dev.azure.com,<br/>scope added if missing (change 4)
     U->>E: sign in, Entra checks the redirect URI (change 8)
     E-->>C: code, delivered to the client's local redirect URI
-    C->>A: POST /token (code, PKCE verifier, resource={gateway URL})
+    C->>A: POST /ado-mcp-proxy/oauth/token (code, PKCE verifier, resource={gateway URL})
     A->>E: same request with resource=https://mcp.dev.azure.com (change 5)
     E-->>C: user token, audience Azure DevOps MCP
     C->>P: initialize, tools/list, tools/call + Bearer token
-    P->>O: forwarded unchanged, Azure DevOps acts as the user
+    P->>O: forwarded unchanged by the MCP server, Azure DevOps acts as the user
 ```
 
 ---
@@ -131,9 +133,18 @@ given a client ID sends the gateway URL to Entra and gets `AADSTS9010010` (Claud
 `--client-id`, VS Code). Codex finds no PRM at the standard addresses for the native URL,
 because APIM serves it under `/ado-mcp-native/.well-known/...`.
 
-**The change.** An `ado-mcp-oauth-compat` API operation at
-`/.well-known/oauth-protected-resource/ado-mcp-proxy/{org}` returns a PRM built from the
-request URL (`infra/policies/oauth-prm.xml`, `<return-response>`).
+**The change.** The working setup's MCP server advertises
+`/ado-mcp-proxy/.well-known/oauth-protected-resource/{org}` in its 401 challenge (change 6),
+just as the native one does. Left alone, APIM's built-in metadata would answer that URL and
+name Entra, as on the regular setup. Instead, the plain API `ado-mcp-proxy-prm` (path
+`/ado-mcp-proxy/.well-known/oauth-protected-resource`) answers it with a PRM for exactly that
+MCP URL (`infra/policies/oauth-prm.xml`, `<return-response>`). API Management routes to the
+most specific API path, so this API takes precedence over the MCP server's built-in metadata
+(verified in the lab). This is the fix. For Codex, which skips the header, the discovery
+alias API `ado-mcp-proxy-discovery-prm` serves the same document at the RFC 9728
+path-inserted URL `/.well-known/oauth-protected-resource/ado-mcp-proxy/{org}`. Both stay
+inside the working setup's path (see
+[Isolation](../README.md#isolation-the-working-setup-owns-one-dedicated-path)).
 
 ```jsonc
 // Before (native pass-through, generated by APIM)
@@ -142,20 +153,20 @@ request URL (`infra/policies/oauth-prm.xml`, `<return-response>`).
   "scopes_supported": [ "https://mcp.dev.azure.com/.default" ] }
 // After (working setup, oauth-prm.xml)
 { "resource": "https://<gateway>/ado-mcp-proxy/<org>",
-  "authorization_servers": [ "https://<gateway>" ],
+  "authorization_servers": [ "https://<gateway>/ado-mcp-proxy/oauth" ],
   "scopes_supported": [ "https://mcp.dev.azure.com/.default" ],
   "bearer_methods_supported": [ "header" ], "resource_name": "Azure DevOps MCP via API Management" }
 ```
 
-**Why it is safe.** It is public, read-only metadata (RFC 9728 §3), served at the
-path-inserted location the RFC defines. It contains no secrets, and organization names are
-validated against the allow-list first.
+**Why it is safe.** It is public, read-only metadata (RFC 9728 §3). It contains no secrets,
+and organization names are validated against the allow-list first.
 
 **Verify.**
 
 ```powershell
-Invoke-RestMethod https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org> | ConvertTo-Json
-# resource = https://<gateway>/ado-mcp-proxy/<org>, authorization_servers = [ https://<gateway> ]
+Invoke-RestMethod https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org> | ConvertTo-Json
+Invoke-RestMethod https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org> | ConvertTo-Json   # alias, same document
+# resource = https://<gateway>/ado-mcp-proxy/<org>, authorization_servers = [ https://<gateway>/ado-mcp-proxy/oauth ]
 ```
 
 KQL: [`client-signins.kql`](kql/client-signins.kql) shows step `prm` per client;
@@ -163,43 +174,52 @@ KQL: [`client-signins.kql`](kql/client-signins.kql) shows step `prm` per client;
 
 ## Change 2: authorization-server metadata with the gateway as issuer
 
-**What the client does.** The PRM says "the key office is `https://<gateway>`". The client
-then reads that office's address book ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414)):
-where to register, where to send the user, where to swap the code. Codex tries
-`/.well-known/oauth-authorization-server/<path>` first, then `openid-configuration`
-variants, then the root `/.well-known/oauth-authorization-server` (observed). Copilot CLI
-and Claude Code check that the `issuer` in the document equals the address they fetched it
-from ([copilot-cli#4584](https://github.com/github/copilot-cli/issues/4584)).
+**What the client does.** The PRM says "the key office is
+`https://<gateway>/ado-mcp-proxy/oauth`". The client then reads that office's address book
+([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414)): where to register, where to
+send the user, where to swap the code. For an issuer with a path, clients try the
+path-inserted URLs `/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth` and
+`/.well-known/openid-configuration/ado-mcp-proxy/oauth`, then the path-appended
+`/ado-mcp-proxy/oauth/.well-known/openid-configuration`
+([MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization#authorization-server-metadata-discovery)).
+Codex was observed to try them in that order. Copilot CLI and Claude Code check that the
+`issuer` in the document equals the address they fetched it from
+([copilot-cli#4584](https://github.com/github/copilot-cli/issues/4584)).
 
-**Without it.** No address book, so no sign-in: the client cannot find `/authorize` or
-`/token`. A wrong `issuer` makes Copilot CLI stop with *"issuer does not match"*
+**Without it.** No address book, so no sign-in: the client cannot find `authorize` or
+`token`. A wrong `issuer` makes Copilot CLI stop with *"issuer does not match"*
 (*unverified in this lab*; reported in the issue above).
 
-**The change.** `oauth-as-metadata.xml` answers `/.well-known/oauth-authorization-server`
-and `/.well-known/openid-configuration` with `issuer` computed from the request URL.
+**The change.** `oauth-as-metadata.xml` answers all of these URLs: path-appended in the
+OAuth API, path-inserted in the discovery aliases `ado-mcp-proxy-discovery-as` and
+`ado-mcp-proxy-discovery-oidc`. The issuer is the request origin plus `/ado-mcp-proxy/oauth`.
 
 ```jsonc
 // After
-{ "issuer": "https://<gateway>",
-  "authorization_endpoint": "https://<gateway>/authorize",
-  "token_endpoint": "https://<gateway>/token",
-  "registration_endpoint": "https://<gateway>/register",
+{ "issuer": "https://<gateway>/ado-mcp-proxy/oauth",
+  "authorization_endpoint": "https://<gateway>/ado-mcp-proxy/oauth/authorize",
+  "token_endpoint": "https://<gateway>/ado-mcp-proxy/oauth/token",
+  "registration_endpoint": "https://<gateway>/ado-mcp-proxy/oauth/register",
   "code_challenge_methods_supported": [ "S256" ],
   "token_endpoint_auth_methods_supported": [ "none" ],
   "scopes_supported": [ "https://mcp.dev.azure.com/.default" ] }
 ```
 
 **Why it is safe.** Metadata only. It advertises PKCE S256 and public clients
-(`token_endpoint_auth_method: none`), which is what MCP clients are.
+(`token_endpoint_auth_method: none`), which is what MCP clients are. Because the issuer has
+a path, the gateway root stays free for other APIs.
 
-**Verify.** `Invoke-RestMethod https://<gateway>/.well-known/oauth-authorization-server`:
-`issuer` equals `https://<gateway>` exactly, with no trailing slash. KQL step `as-metadata`.
+**Verify.** `Invoke-RestMethod https://<gateway>/ado-mcp-proxy/oauth/.well-known/openid-configuration`
+and `https://<gateway>/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth`: `issuer`
+equals `https://<gateway>/ado-mcp-proxy/oauth` exactly, with no trailing slash. KQL step
+`as-metadata`.
 
 ## Change 3: a registration desk that hands out one pre-registered client
 
 **What the client does.** All three CLIs (and VS Code) register themselves through
 [dynamic client registration](GLOSSARY.md#dcr) ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)):
-`POST /register` with their name and local redirect URI. Observed `client_name` values:
+`POST <registration_endpoint>` (`/ado-mcp-proxy/oauth/register`) with their name and local
+redirect URI. Observed `client_name` values:
 `GitHub Copilot CLI`, `Codex`, `Claude Code (<server name>)`.
 
 **Without it (observed).** Entra has no registration endpoint. Claude Code reports
@@ -214,7 +234,7 @@ pre-registered Entra **public client** ID. It echoes the client's `redirect_uris
 `client_name` and `redirect_uris` (not secrets) for troubleshooting.
 
 ```json
-POST https://<gateway>/register
+POST https://<gateway>/ado-mcp-proxy/oauth/register
 {"client_name":"Codex","redirect_uris":["http://127.0.0.1:57130/callback/<id>"], ...}
 
 HTTP/1.1 201 Created
@@ -231,7 +251,7 @@ consent and redirect URIs are managed in one place.
 **Verify.**
 
 ```powershell
-Invoke-RestMethod https://<gateway>/register -Method Post -ContentType application/json `
+Invoke-RestMethod https://<gateway>/ado-mcp-proxy/oauth/register -Method Post -ContentType application/json `
   -Body '{"client_name":"test","redirect_uris":["http://127.0.0.1/"]}'   # client_id = your public client
 ```
 
@@ -257,7 +277,7 @@ string, **drop** `resource`, add `scope` only if the client sent none, append
 
 ```http
 # Before (what the client sends to the gateway)
-GET https://<gateway>/authorize?client_id=<public-client-id>&redirect_uri=http%3A%2F%2Flocalhost%3A45766%2Fcallback
+GET https://<gateway>/ado-mcp-proxy/oauth/authorize?client_id=<public-client-id>&redirect_uri=http%3A%2F%2Flocalhost%3A45766%2Fcallback
     &scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default&code_challenge=...&code_challenge_method=S256&state=...
     &resource=https%3A%2F%2F<gateway>%2Fado-mcp-proxy%2F<org>
 # After (what APIM sends the browser to)
@@ -269,7 +289,9 @@ GET https://<gateway>/authorize?client_id=<public-client-id>&redirect_uri=http%3
 Adding `scope` when it is missing is a safety net. All three CLIs sent it in the lab, but
 Claude Code and Copilot CLI versions have omitted it, and Entra then answers `AADSTS900144`
 ([claude-code#72440](https://github.com/anthropics/claude-code/issues/72440),
-[copilot-cli#4582](https://github.com/github/copilot-cli/issues/4582)).
+[copilot-cli#4582](https://github.com/github/copilot-cli/issues/4582)). It also covers the
+challenge, which no longer names a scope (change 6): clients take the scope from the PRM
+(`scopes_supported`), and the gateway adds it if they send none.
 
 **Why it is safe.** The new resource is the one the scope already belongs to, so the token
 is exactly what the client asked for: a token for Azure DevOps MCP. Nothing else changes.
@@ -304,55 +326,61 @@ started the sign-in, and the token's audience is Azure DevOps MCP, not APIM.
 **Verify.** KQL steps `token` and `token-response` (`statusCode` 200). After sign-in,
 `proxy-inbound` traces show `clientAppId` = your public client ID and the user's `oid`.
 
-## Change 6: the 401 challenge points to APIM and names the scope
+## Change 6: the 401 challenge points at the setup's own PRM URL (built in)
 
 **What the client does.** Copilot CLI, Claude Code and VS Code read the `WWW-Authenticate`
-header of the first `401` to find the PRM. Copilot CLI also uses its `scope` parameter
-when it chooses scopes
+header of the first `401` to find the PRM. Copilot CLI also uses a `scope` parameter there
+when one is present
 ([copilot-cli#4582](https://github.com/github/copilot-cli/issues/4582)).
-[MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
-asks servers to include it.
 
 **Without it.** The origin's challenge points at `mcp.dev.azure.com` metadata whose
 `resource` is not the gateway URL, so VS Code and Claude Code reject it.
 
-**The change.** `proxy-mcp.xml`, outbound, when the response is `401`:
+**The change.** None in a policy. The APIM MCP server generates the challenge itself, exactly
+as on the regular setup, with a URL under its own path. What makes the difference is
+change 1: on the working setup that URL is answered by the PRM API, not by APIM's built-in
+metadata.
 
 ```text
-Before (origin): Bearer resource_metadata="https://mcp.dev.azure.com/.well-known/oauth-protected-resource/<org>"
-After (APIM):    Bearer resource_metadata="https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>", scope="https://mcp.dev.azure.com/.default"
+Origin:                     Bearer resource_metadata="https://mcp.dev.azure.com/.well-known/oauth-protected-resource/<org>"
+Working setup (APIM):       Bearer resource_metadata="https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>"
+Bare endpoint (no <org>):   Bearer resource_metadata="https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/"
 ```
 
-**Why it is safe.** It only replaces a pointer to public metadata.
+The challenge has no `scope` parameter, which
+[MCP 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
+recommends. That did not matter in the lab: clients took the scope from the PRM, and
+`/authorize` and `/token` add it if it is missing (changes 4 and 5). Copilot CLI and Claude
+Code signed in with this challenge on 2026-11-18 (Codex does not read it). (Earlier versions of the lab
+used a plain HTTP API, which had to rewrite the origin's challenge in `proxy-mcp.xml`
+outbound and added `scope`. That rewrite no longer exists.)
+
+**Why it is safe.** It is APIM's standard behaviour and points only at public metadata.
 
 **Verify.** Run an unauthenticated `POST` (see [TESTING.md](TESTING.md#2-curl--powershell-raw-protocol)):
-`401` with the header above. KQL: [`www-authenticate-rewrite.kql`](kql/www-authenticate-rewrite.kql).
+`401` with the header above, then fetch the URL it names: `authorization_servers` must be
+`https://<gateway>/ado-mcp-proxy/oauth`, not Entra.
 
-## Change 7: body-less `GET` and `DELETE` must not crash the gateway
+## Change 7: body-less `GET` and `DELETE` must not fail (built in)
 
 **What the client does.** Codex starts with a plain `GET` of the MCP URL, with no body and no
 token, to see what the server says (observed). The
 [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#listening-for-messages-from-the-server)
 allows `GET` (to open a stream) and `DELETE` (to end a session). A server may answer `405`.
 
-**Without it (observed).** The tool-validation fragment read the request body without
-checking that there was one, so APIM answered `500` to every `GET`/`DELETE`. Codex then
-stopped: `OAuth metadata discovery failed for https://<gateway>/ado-mcp-proxy/<org> Caused
-by: unexpected HTTP status 500 Internal Server Error`.
+**Without it (observed earlier).** When the working setup was a plain HTTP API, its
+tool-validation fragment read the request body without checking that there was one, so APIM
+answered `500` to every `GET`/`DELETE`. Codex then stopped: `OAuth metadata discovery failed
+for https://<gateway>/ado-mcp-proxy/<org> Caused by: unexpected HTTP status 500 Internal
+Server Error`.
 
-**The change.** `infra/policies/fragments/tool-validation.xml`, first `<set-variable name="mcp-tool">`:
+**The change.** None any more. The MCP server answers a body-less `GET` with `405` natively,
+and the policy reads the body only for telemetry, falling back to the HTTP method when there
+is none (`proxy-mcp.xml`, `set-variable mcp-method`). `oauth-token.xml` and
+`oauth-register.xml` keep their own null-body guards.
 
-```csharp
-// Before
-var text = (context.Request.Body.As<string>(preserveContent: true) ?? "").TrimStart();
-// After
-var text = (context.Request.Body == null ? "" : context.Request.Body.As<string>(preserveContent: true) ?? "").TrimStart();
-```
-
-The same guard was added to `oauth-token.xml` and `oauth-register.xml`.
-
-**Why it is safe.** A request without a body is never a `tools/call`, so validation has
-nothing to check. The request goes on to Azure DevOps, which answers `405`.
+**Why it is safe.** A request without a body carries no MCP message; Codex continues with
+the well-known URLs.
 
 **Verify.**
 
@@ -403,7 +431,7 @@ another local process from using an intercepted code.
 
 Not needed to sign in, but essential for troubleshooting:
 
-- The OAuth compatibility API logs the **`User-Agent`** header (`copilot-cli/<version>`,
+- The PRM and OAuth compatibility APIs and the discovery aliases log the **`User-Agent`** header (`copilot-cli/<version>`,
   `codex-mcp-client/<version>`, `claude-code/<version>`). Bodies, codes and tokens are
   still never logged (`infra/modules/mcp-proxy.bicep`, `oauthDiagnostics`).
 - `register` traces carry `clientName` and `redirectUris`. `authorize` traces carry
@@ -424,15 +452,17 @@ Nothing above is applied to the native API. Native results with the three CLIs:
 | Claude Code `--client-id` | ❌ `AADSTS9010010` | Sends the gateway URL as `resource` to Entra: **the reported error** |
 | VS Code | ❌ `AADSTS9010010` | Same |
 | Copilot CLI (interactive) | ✅ connects | Copilot CLI recognizes Microsoft Entra as the authorization server and signs in with its **own built-in Entra account broker**. It does not use DCR or the gateway `resource`, and APIM saw no `/register` or `/authorize` call. A client feature, not a gateway fix. In `-p` mode the native server still reports *requires authentication*. |
-| Codex CLI | ✅ connects, **in this lab only** | Codex ignores the native challenge, finds no PRM at the standard addresses, and falls back to the authorization server at the host root. That is the working setup's `/.well-known/oauth-authorization-server`, on the same APIM instance, so Codex borrows changes 2–5. The token's `azp` on the native calls is the lab's public client. On an APIM without the working setup, Codex finds no metadata and cannot sign in (*unverified*). |
+| Codex CLI | ❌ *Dynamic registration failed: HTTP 404* (after the isolation, 2026-11-18) | Codex ignores the native challenge and finds no PRM at the standard addresses (the native PRM lives under `/ado-mcp-native/.well-known/...`). It then falls back to default endpoints at the host root and `POST /register` gets `404`. Before the working setup moved to its own path, this fallback reached the working setup's root endpoints and Codex "connected" with the lab's public client: a side effect the isolation removed. |
 
 Two side observations on the native API:
 
 - Claude Code and Copilot CLI first offer protocol version `2026-07-28`, which the Azure
-  DevOps server answers with `400`. Both then fall back to an older version. On the proxy the
-  `400` passes through. On the native API, APIM turned it into
-  `500 ProtocolViolation: Content length mismatch` for Claude Code, and `claude mcp list`
-  then reported `ECONNRESET` for the native server.
+  DevOps server answers with `400`. Both then fall back to an older version. On the earlier
+  HTTP-proxy version of the working setup the `400` passed through. On the native API, APIM
+  turned it into `500 ProtocolViolation: Content length mismatch` for Claude Code, and
+  `claude mcp list` then reported `ECONNRESET` for the native server. The working setup is
+  now the same API type; Claude Code connected through it on 2026-11-18, but the status of
+  that first request was not re-checked (*unverified*).
 - The first `400` you see per session in the logs is this version negotiation, not an error.
 
 ## Related

@@ -1,8 +1,8 @@
 targetScope = 'resourceGroup'
 
-// Azure DevOps remote MCP server behind Azure API Management.
-//   Regular setup  : native APIM MCP pass-through                     - reproduces the issue.
-//   Working setup  : APIM HTTP proxy + OAuth compatibility endpoints     - works with VS Code.
+// Azure DevOps remote MCP server behind Azure API Management, as two APIM MCP servers.
+//   Regular setup  : native APIM MCP pass-through                                   - reproduces the issue.
+//   Working setup  : native APIM MCP pass-through + PRM/OAuth compatibility APIs    - works with VS Code and the CLIs.
 // Both share Application Insights + Log Analytics telemetry. See README.md.
 
 @description('APIM instance name. Adopted when createApim is false.')
@@ -47,22 +47,14 @@ param rateLimitPeriod int = 60
 @maxValue(8192)
 param mcpRequestBodyBytes int = 4096
 
-@description('Validate tools/call arguments of vetted tools (infra/schemas/tools) on the working setup (HTTP proxy).')
-param toolValidation bool = true
-
-@description('What happens to tools/call for tools without a gateway schema: allow (pass through) or deny (JSON-RPC error).')
-@allowed([
-  'allow'
-  'deny'
-])
-param unlistedToolAction string = 'allow'
-
-@description('Lab-only: echo raw validate-content errors in rejections (may contain submitted values).')
-param toolValidationDebug bool = false
-
 @description('Native pass-through API path. Clients connect to {gateway}/{path}/{organization}.')
 param nativeApiPath string = 'ado-mcp-native'
+
+@description('Working setup dedicated path. Clients connect to {gateway}/{path}/{organization}; its OAuth endpoints live under {gateway}/{path}/oauth. Nothing is mounted at the gateway root.')
 param proxyApiPath string = 'ado-mcp-proxy'
+
+@description('Working setup: also serve its metadata at the path-inserted /.well-known/.../{proxyApiPath} URLs (RFC 9728/8414). Required by OpenAI Codex and Claude Code (they fail without it); each alias matches only this setup\'s path.')
+param rootDiscoveryAliases bool = true
 
 param workspaceName string = 'log-${apimName}'
 param appInsightsName string = 'appi-${apimName}'
@@ -135,18 +127,6 @@ resource backend 'Microsoft.ApiManagement/service/backends@2024-05-01' = {
   ]
 }
 
-module toolValidationModule 'modules/mcp-tool-validation.bicep' = if (toolValidation) {
-  name: 'mcp-tool-validation'
-  params: {
-    apimName: apimName
-    denyUnlistedTools: unlistedToolAction == 'deny'
-    debugRawErrors: toolValidationDebug
-  }
-  dependsOn: [
-    apimService
-  ]
-}
-
 // Shared fragments and the named values they read (allow-list, read-only, toolsets).
 module fragments 'modules/policy-fragments.bicep' = {
   name: 'mcp-policy-fragments'
@@ -161,7 +141,6 @@ module fragments 'modules/policy-fragments.bicep' = {
   ]
 }
 
-var toolValidationPolicy = toolValidation ? '<include-fragment fragment-id="${toolValidationModule!.outputs.fragmentName}" />' : ''
 // Native pass-through with the organization in the client path: discovery and tool calls work through APIM;
 // only the rewritten PRM "resource" breaks Entra sign-in. (With the organization in the backend URL instead,
 // APIM's advertised PRM URL returns 404.)
@@ -172,10 +151,9 @@ module native 'modules/mcp-native.bicep' = {
     apiName: nativeApiPath
     apiPath: nativeApiPath
     displayName: 'Azure DevOps MCP (native pass-through)'
+    apiDescription: 'Regular setup (reproduction): APIM native MCP pass-through to the hosted Azure DevOps MCP server, with read-only header and telemetry. Tool calls work with a token; client sign-in fails with AADSTS9010010 because the PRM APIM serves names Entra as authorization server for the gateway URL. Use ado-mcp-proxy for a working sign-in.'
     backendName: backend.name
     clientPathSuffix: '/${adoOrganization}'
-    // Not toolValidationPolicy: validate-content needs an API operation; native MCP APIs have none,
-    // and including it makes every native request fail with HTTP 500 (see README).
     appInsightsLoggerId: observability.outputs.appInsightsLoggerId
     loggedHeaders: loggedHeaders
     requestBodyBytes: mcpRequestBodyBytes
@@ -196,7 +174,7 @@ module proxy 'modules/mcp-proxy.bicep' = if (!empty(publicClientId)) {
     tenantId: tenantId
     clientId: publicClientId
     proxyPath: proxyApiPath
-    toolValidationPolicy: toolValidationPolicy
+    rootDiscoveryAliases: rootDiscoveryAliases
     rateLimitCalls: rateLimitCalls
     rateLimitPeriod: rateLimitPeriod
     requestBodyBytes: mcpRequestBodyBytes
@@ -209,6 +187,7 @@ module proxy 'modules/mcp-proxy.bicep' = if (!empty(publicClientId)) {
 output originUrl string = 'https://mcp.dev.azure.com/${adoOrganization}'
 output nativeMcpUrl string = native.outputs.url
 output proxyMcpUrl string = empty(publicClientId) ? '' : '${proxy!.outputs.proxyBaseUrl}/${adoOrganization}'
+output proxyOAuthIssuer string = empty(publicClientId) ? '' : proxy!.outputs.oauthIssuer
+output proxyApiNames array = empty(publicClientId) ? [] : proxy!.outputs.apiNames
 output appInsightsName string = monitoring.outputs.appInsightsName
 output workspaceId string = monitoring.outputs.workspaceId
-output validatedTools array = toolValidation ? toolValidationModule!.outputs.vettedTools : []

@@ -1,0 +1,36 @@
+// Application Insights: one client's whole sign-in and MCP session as a single timeline.
+// MCP clients send no W3C traceparent, so every HTTP call is its own operation (its own
+// operation_Id) and the portal shows each one separately. This query stitches them back
+// together: one row per gateway call, in time order, with the call's policy trace steps
+// and its backend dependency folded in.
+// Replace <client> with part of a User-Agent (codex, claude, copilot, vscode, Bun for
+// Claude Code's OAuth requests) and <user-oid> with an Entra object ID to follow one user;
+// left as is, each filter is off. Sign-in steps carry no user yet (no token), so filter
+// them by client, and the MCP calls after sign-in by user.
+let client = "<client>";
+let userOid = "<user-oid>";
+let since = ago(4h);
+let byClient = client has "client";
+let byUser = userOid has "user-oid";
+let traces = AppTraces
+    | where TimeGenerated > since
+    | order by TimeGenerated asc
+    | summarize steps = strcat_array(make_list(tostring(Properties["step"])), " > "),
+                mcpMethod = take_anyif(tostring(Properties["mcpMethod"]), isnotempty(tostring(Properties["mcpMethod"]))),
+                organization = take_anyif(tostring(Properties["organization"]), isnotempty(tostring(Properties["organization"]))),
+                user = take_anyif(tostring(Properties["userOid"]), isnotempty(tostring(Properties["userOid"]))),
+                clientAppId = take_anyif(tostring(Properties["clientAppId"]), isnotempty(tostring(Properties["clientAppId"])))
+      by ParentId;
+let deps = AppDependencies
+    | where TimeGenerated > since
+    | summarize backend = take_any(strcat(Target, " ", ResultCode)) by ParentId;
+AppRequests
+| where TimeGenerated > since
+| extend userAgent = tostring(Properties["Request-User-Agent"])
+| where byClient or userAgent contains client
+| join kind=leftouter traces on $left.Id == $right.ParentId
+| join kind=leftouter deps on $left.Id == $right.ParentId
+| where byUser or user == userOid
+| project TimeGenerated, userAgent = substring(userAgent, 0, 40), request = Name, ResultCode, DurationMs,
+          steps, mcpMethod, organization, user, clientAppId, backend, OperationId
+| order by TimeGenerated asc

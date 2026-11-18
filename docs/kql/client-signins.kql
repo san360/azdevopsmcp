@@ -14,7 +14,7 @@ AppRequests
     | where TimeGenerated > ago(1d)
     | extend step = tostring(Properties["step"])
     | where step in ("register", "authorize", "token", "token-response", "prm", "as-metadata",
-                     "proxy-inbound", "native-inbound", "tool-validation")
+                     "proxy-inbound", "native-inbound")
     | project ParentId, step, Message,
               clientName = tostring(Properties["clientName"]),
               redirect = coalesce(tostring(Properties["redirectUri"]), tostring(Properties["redirectUris"])),

@@ -246,6 +246,31 @@ def fetch_authorization_metadata(issuer: str) -> dict[str, Any] | None:
     return None
 
 
+OAUTH_ENDPOINT_KEYS = ("issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint")
+
+
+def oauth_isolation(mcp_url: str, meta: dict[str, Any]) -> tuple[bool | None, str]:
+    """Whether gateway-hosted OAuth endpoints stay under the MCP URL's first path segment.
+
+    Returns (None, reason) when the check does not apply: the MCP URL has no path, or the
+    authorization server is on another host (for example Microsoft Entra).
+    """
+    parts = urllib.parse.urlsplit(mcp_url)
+    segment = parts.path.strip("/").split("/")[0]
+    if not segment:
+        return None, "MCP URL has no path"
+    prefix = f"/{segment}"
+    same_host = {key: meta[key] for key in OAUTH_ENDPOINT_KEYS
+                 if isinstance(meta.get(key), str) and urllib.parse.urlsplit(meta[key]).netloc.lower() == parts.netloc.lower()}
+    if not same_host:
+        return None, "authorization server on another host"
+    outside = [f"{key}={value}" for key, value in same_host.items()
+               if not (urllib.parse.urlsplit(value).path.rstrip("/") + "/").startswith(prefix + "/")]
+    if outside:
+        return False, "outside " + prefix + ": " + ", ".join(outside)
+    return True, f"{len(same_host)} endpoints under {prefix}/"
+
+
 # --------------------------------------------------------------------- results
 
 
@@ -361,6 +386,10 @@ class Probe:
                 client_id, how_client = registered["client_id"], "dynamic client registration"
         self._add(name, "client: authorization server metadata", True,
                   f"issuer={meta.get('issuer')} client_id via {how_client}")
+        isolated, why = oauth_isolation(url, meta)
+        if isolated is not None:
+            # Gateway-hosted OAuth must not claim routes outside this setup's dedicated path.
+            self._add(name, "client: OAuth endpoints under the MCP path (isolation)", isolated, why)
 
         _, challenge = pkce_pair()
         authorize = build_authorize_url(meta["authorization_endpoint"], client_id=client_id,

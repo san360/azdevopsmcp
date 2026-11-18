@@ -37,8 +37,8 @@
     {
       "name": "apim-proxy",
       "url": "https://example-gateway.azure-api.net/ado-mcp-proxy/example-organization",
-      "description": "Working setup: APIM HTTP proxy + OAuth compatibility + tool validation.",
-      "toolValidation": "enforced"
+      "description": "Working setup: APIM MCP server + PRM/OAuth compatibility APIs.",
+      "toolValidation": "none"
     },
     {
       "name": "apim-proxy-bare",

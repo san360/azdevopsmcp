@@ -1,25 +1,33 @@
 <!--
   POLICY  : oauth-prm.xml (working setup; OAuth discovery step 1)
-  PURPOSE : Serves OAuth protected-resource metadata (PRM) computed from the
-            request URL, so "resource" is exactly the URL the client connects to
-            and the authorization server is the gateway itself.
-  RUNS ON : API "ado-mcp-oauth-compat" (host root), operations
-            GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org} and
-            GET /.well-known/oauth-protected-resource/ado-mcp-proxy. Called right
-            after the proxy's 401 challenge, before any sign-in.
+  PURPOSE : Serves OAuth protected-resource metadata (PRM) for the working setup,
+            so "resource" is exactly the URL the client connects to and the
+            authorization server is the gateway's OAuth compatibility issuer under
+            the setup's dedicated path.
+  RUNS ON : API "ado-mcp-proxy-prm" (path
+            ado-mcp-proxy/.well-known/oauth-protected-resource), operations
+            GET / and GET /{org} (the URL the MCP server's 401 challenge names), and,
+            when rootDiscoveryAliases is on, API "ado-mcp-proxy-discovery-prm" (path
+            .well-known/oauth-protected-resource/ado-mcp-proxy), operations
+            GET / and GET /{org} (RFC 9728 path-inserted URL; Codex). Called
+            right after the MCP server's 401 challenge, before any sign-in.
   INPUT   : Anonymous GET, no body, no token.
   OUTPUT  : 200 JSON, answered by APIM without a backend call:
             resource = {origin}/ado-mcp-proxy[/{org}],
-            authorization_servers = [{origin}], scopes_supported = Azure DevOps
-            MCP scope. 404 for an organization the proxy would reject.
+            authorization_servers = [{origin}/ado-mcp-proxy/oauth],
+            scopes_supported = Azure DevOps MCP scope. 404 for an organization
+            the proxy would reject.
   WHY     : RFC 9728 s3.3: resource must equal the URL the client used (VS Code
             enforces it). Pointing authorization_servers at the gateway lets APIM
             translate the RFC 8707 resource before Entra sees it (AADSTS9010010
-            otherwise). The origin comes from the request, so custom domains work.
+            otherwise). The issuer has a path, so nothing of this setup sits at
+            the gateway root. The origin comes from the request, so custom
+            domains work.
   VERIFY  : AppTraces step prm (docs/kql/policy-traces.kql,
             docs/kql/client-signins.kql).
-  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE). The organization
-            check is the fragment mcp-org-validation.
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE, PROXY_PATH,
+            OAUTH_PATH). The organization check is the fragment
+            mcp-org-validation.
   DETAILS : docs/POLICIES.md
 -->
 <policies>
@@ -34,9 +42,10 @@
       <metadata name="step" value="prm" />
       <metadata name="organization" value="@((string)context.Variables[&quot;org&quot;] == &quot;&quot; ? &quot;none&quot; : (string)context.Variables[&quot;org&quot;])" />
     </trace>
-    <!-- Answer locally. resource = origin plus the path after
-         /.well-known/oauth-protected-resource; authorization_servers = origin,
-         so clients read APIM's authorization-server metadata, not Entra's.
+    <!-- Answer locally. resource = origin + dedicated path (PROXY_PATH) + the
+         organization; authorization_servers = origin + OAUTH_PATH, so clients
+         read APIM's authorization-server metadata, not Entra's. Both URL shapes
+         (challenge URL and path-inserted alias) give the same document.
          scopes_supported = SCOPE placeholder. Access-Control-Allow-Origin lets
          browser clients (MCP Inspector) read it; no-store avoids stale copies. -->
     <return-response>
@@ -53,10 +62,10 @@
       <set-body>@{
         var url = context.Request.OriginalUrl;
         var origin = url.Scheme + Uri.SchemeDelimiter + url.Host;
-        var resourcePath = url.Path.Substring("/.well-known/oauth-protected-resource".Length).TrimEnd('/');
+        var org = (string)context.Variables["org"];
         var prm = new JObject();
-        prm["resource"] = origin + resourcePath;
-        prm["authorization_servers"] = new JArray(origin);
+        prm["resource"] = origin + "/__PROXY_PATH__" + (org.Length == 0 ? "" : "/" + org);
+        prm["authorization_servers"] = new JArray(origin + "/__OAUTH_PATH__");
         prm["bearer_methods_supported"] = new JArray("header");
         prm["scopes_supported"] = new JArray("__SCOPE__");
         prm["resource_name"] = "Azure DevOps MCP via API Management";

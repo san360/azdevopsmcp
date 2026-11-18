@@ -6,7 +6,7 @@ Tested with Claude Code 2.1.322 on Windows (lab, 2026-11-18).
 
 | Step | Behaviour |
 |---|---|
-| Discovery | `POST initialize` → `resource_metadata` from the `401` → PRM (checks `resource` = server URL) → authorization-server metadata |
+| Discovery | `POST initialize` → `resource_metadata` from the `401` (`/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>`) → PRM (checks `resource` = server URL) → authorization-server metadata at the path-inserted alias (`/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth`, observed). Without the alias it falls back to the host root and fails |
 | Client ID | Dynamic client registration, `client_name` `Claude Code (<server name>)`; or a fixed one with `--client-id` |
 | Redirect URI | `http://localhost:<random port>/callback` (Entra registration: `http://localhost/callback`); fixed port with `--callback-port` |
 | `resource` | Sends the gateway URL; APIM replaces it |
@@ -48,18 +48,37 @@ claude mcp list        # ado-proxy: ✔ Connected
 `ado-native-clientid` goes straight to Entra
 (`login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize`) with
 `resource=https://<gateway>/ado-mcp-native/<org>`, and Entra rejects it. `ado-proxy` goes
-to the gateway's `/authorize`, which replaces `resource`.
+to the gateway's `/ado-mcp-proxy/oauth/authorize`, which replaces `resource`.
+
+To sign in with a specific browser profile, run `claude mcp login ado-proxy --no-browser`
+in a real terminal and open the printed URL yourself (for example
+`msedge.exe --profile-directory="<profile>" "<url>"`); the callback completes on its own.
+
+**Claude Code caches the authorization server it discovered.** After a gateway change
+(for example the move of the OAuth endpoints from the root to `/ado-mcp-proxy/oauth`), it
+kept using the old issuer and opened the removed root `/authorize` (`404`) until signed out:
+
+```powershell
+claude mcp logout ado-proxy     # clears tokens and discovery state
+claude mcp login ado-proxy
+```
+
+Re-verified 2026-11-18 on the current layout (the working setup as an APIM MCP server,
+everything under `/ado-mcp-proxy`): `claude mcp list` → `ado-proxy: ... √ Connected` through
+the MCP server, and fresh discovery (`claude mcp login ado-proxy --no-browser`) prints an
+authorize URL starting with `https://<gateway>/ado-mcp-proxy/oauth/authorize`.
 
 ## Test
 
 ```powershell
-claude -p "Use only the ado-proxy MCP server. Call core_list_projects with no arguments and print the project names. Then call core_list_projects with top set to 500 and print the exact error." `
+claude -p "Use only the ado-proxy MCP server. Call core_list_projects with no arguments and print the project names." `
   --allowedTools "mcp__ado-proxy__core_list_projects"
 ```
 
 *Unverified in the lab:* no Claude model was reachable from the lab network, so the agent
 run itself was not executed. Sign-in, connection and `tools/list` through the proxy were
-verified in the gateway logs. Expect the same gateway error text as the other clients.
+verified in the gateway logs. Expect the project names. The gateway does not validate tool
+arguments any more ([TOOL-VALIDATION.md](../TOOL-VALIDATION.md)).
 
 ## Logs
 
@@ -72,8 +91,10 @@ shows `register` (`Claude Code (ado-proxy)`, `localhost:<port>/callback`), `auth
 | Symptom | Cause | Fix |
 |---|---|---|
 | `stdin isn't a terminal` on `claude mcp login --no-browser` | Login needs an interactive terminal | Run it in a normal terminal |
-| `ECONNRESET` for the native server in `claude mcp list` | The native API returned `500 ProtocolViolation: Content length mismatch` to the CLI's first protocol-version probe | Regular setup only; the proxy is not affected |
+| `ECONNRESET` for the native server in `claude mcp list` | The native API returned `500 ProtocolViolation: Content length mismatch` to the CLI's first protocol-version probe | Seen on the regular setup. The working setup (same API type) connected on 2026-11-18 |
 | `AADSTS900144` (scope missing) | Some versions sent no scope ([claude-code#72440](https://github.com/anthropics/claude-code/issues/72440)) | The gateway adds the scope |
 | A configured `Authorization` header disables OAuth | By design | Leave headers out for OAuth servers |
+| *Dynamic Client Registration rejected (HTTP 404)* on the proxy URL | The gateway's discovery aliases are missing; Claude Code does not try the OpenID path-appended URL and falls back to the host root (observed) | Redeploy with `rootDiscoveryAliases = true` |
+| Browser opens `https://<gateway>/authorize` → `404` | Cached authorization server from an older gateway layout | `claude mcp logout <name>`, then `claude mcp login <name>` |
 
 References: [Claude Code MCP documentation](https://code.claude.com/docs/en/mcp).
