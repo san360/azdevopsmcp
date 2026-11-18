@@ -18,6 +18,14 @@ Step-by-step setup and test instructions for each MCP client, against both lab U
 Why each client behaves this way, and what APIM changes make the working setup work for it:
 [CLIENTS-APIM-CHANGES.md](../CLIENTS-APIM-CHANGES.md).
 
+**Behind Application Gateway** (custom domain, APIM in internal mode,
+[APP-GATEWAY.md](../APP-GATEWAY.md)): use `https://<host>/ado-mcp-proxy/<org>` and
+`https://<host>/ado-mcp-native/<org>` in place of the gateway URLs, and register the Codex
+redirect URIs for them (`setup-entra.ps1 -McpUrl`). Verified so far: OpenAI Codex CLI signs
+in to the working setup; on the regular setup it fails with *OAuth metadata discovery failed
+... 502* instead of *registration 404* (App Gateway answers unrouted root paths). VS Code,
+Copilot CLI, Claude Code and MCP Inspector through App Gateway are **pending** (manual runs).
+
 ## Before you start (all clients)
 
 1. The lab is deployed ([GETTING-STARTED.md](../GETTING-STARTED.md)).

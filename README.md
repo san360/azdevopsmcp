@@ -65,6 +65,7 @@ the gateway the same way.
 | 6 | [Policies](docs/POLICIES.md) | Every APIM policy, element by element |
 | 7 | [Analysis](docs/ANALYSIS.md) | Root cause, reference implementation, options, sources |
 | 8 | [Azure AI Gateway](docs/AI-GATEWAY.md) | Does the new AI Gateway (GA 2026-11-17) solve this natively? Requirement matrix and live test |
+| 9 | [Behind Application Gateway](docs/APP-GATEWAY.md) | Custom domain, APIM in internal mode, App Gateway routing, timeouts, rate limiting behind a proxy, test results |
 | — | [Glossary](docs/GLOSSARY.md) · [Observability](docs/OBSERVABILITY.md) · [Tool argument validation (optional)](docs/TOOL-VALIDATION.md) | Reference |
 
 ## How a remote MCP server connection works
@@ -449,15 +450,17 @@ because it is the reproduction. For sign-in, the only thing that matters is OAut
 infra/
   main.bicep                       entry point (resource-group scope)
   main.example.bicepparam          copy to main.local.bicepparam (gitignored)
-  modules/apim.bicep               optional: create a Developer-tier APIM
+  modules/apim.bicep               optional: create a Developer-tier APIM (public, or internal VNet mode with a Key Vault custom host)
   modules/monitoring.bicep         Log Analytics + workspace-based Application Insights
   modules/apim-observability.bicep APIM loggers, diagnostics, diagnostic settings
   modules/mcp-native.bicep         regular setup: native MCP pass-through
   modules/mcp-proxy.bicep          working setup: MCP server + PRM/OAuth compatibility APIs, all under its dedicated path
-  modules/policy-fragments.bicep   shared policy fragments + named values (allow-list, read-only, toolsets)
+  modules/policy-fragments.bicep   shared policy fragments + named values (allow-list, read-only, toolsets, proxy trust, rate-limit key)
   policies/                        APIM policy XML per API/operation (see diagram 2)
   policies/fragments/              reusable policy fragments included by those policies
+infra/edge/                        optional: Application Gateway + APIM in internal mode + Key Vault (docs/APP-GATEWAY.md)
 scripts/setup-entra.ps1            Entra prerequisites (service principal, public client, client redirect URIs)
+scripts/request-certificate.ps1    custom-domain certificate in Key Vault via Let's Encrypt (DNS-01 in Azure DNS)
 tools/mcp_probe.py                 end-to-end probe (origin vs gateway), stdlib only
 tools/query_logs.py                run docs/kql/*.kql from the command line
 tools/probe.example.json           copy to probe.local.json (gitignored)
@@ -473,6 +476,7 @@ docs/OBSERVABILITY.md              where calls and policy events land; KQL guide
 docs/GLOSSARY.md                   PRM, DCR, PKCE, resource indicator, AADSTS codes, APIM terms
 docs/ANALYSIS.md                   root cause, reference implementation, options, sources
 docs/AI-GATEWAY.md                 Azure AI Gateway: requirement matrix, live test, recommendation
+docs/APP-GATEWAY.md                Application Gateway + custom domain + APIM internal: design, deployment, test results
 infra/aigateway/                   optional AI Gateway lab (federated MCP server, OBO backend)
 docs/kql/                          ready-made queries
 docs/diagrams/                     diagram sources (.mmd) and SVG / PNG exports
@@ -576,6 +580,9 @@ for non-production use only. Log Analytics and workspace-based Application Insig
 by ingested data; this lab produces little. See
 [APIM pricing](https://azure.microsoft.com/pricing/details/api-management/) and
 [Azure Monitor pricing](https://azure.microsoft.com/pricing/details/monitor/).
+The optional Application Gateway edge ([docs/APP-GATEWAY.md](docs/APP-GATEWAY.md#12-cost))
+adds a second APIM instance and an hourly-billed Application Gateway; stop the gateway
+between sessions.
 Delete the lab resource group when finished.
 
 ## Credits

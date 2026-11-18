@@ -1,0 +1,18 @@
+// Application Gateway in front of APIM (docs/APP-GATEWAY.md): every request the
+// gateway received, with the route it took. Resource-specific table AGWAccessLogs
+// (diagnostic setting "appgw-to-log-analytics").
+//   BackendPoolName apim      -> routed MCP path, forwarded to APIM
+//   BackendPoolName unrouted  -> any other path; 502 ERRORINFO_EMPTY_BACKEND_POOL by design
+//   ServerStatus / HttpStatus -> APIM's status / the status the client got (504 = backend timeout)
+// ClientIp is the real client; APIM sees it as the last X-Forwarded-For entry.
+AGWAccessLogs
+| where TimeGenerated > ago(1h)
+| project TimeGenerated, ClientIp, HttpMethod, OriginalHost, RequestUri, HttpStatus, ServerStatus,
+          BackendPoolName, ErrorInfo, TimeTaken, ServerResponseLatency, ServerRouted, UserAgent, TransactionId
+| order by TimeGenerated desc
+
+// Summary per path and outcome (uncomment to run instead):
+// AGWAccessLogs
+// | where TimeGenerated > ago(1d)
+// | summarize Requests = count() by BackendPoolName, HttpStatus, ErrorInfo, Path = tostring(split(RequestUri, "?")[0])
+// | order by Requests desc

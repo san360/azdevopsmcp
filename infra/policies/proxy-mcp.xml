@@ -24,7 +24,9 @@
             (docs/kql/policy-traces.kql); failures in docs/kql/errors.kql.
   STEPS   : inbound 1 HTTPS only, 2 organization (fragment mcp-org-validation),
             3 correlation id, 4 MCP method, 5 caller (fragment mcp-caller-identity),
-            6 trace, 7 rate limit, 8 backend headers (fragment mcp-backend-headers).
+            6 trace, 7 client IP and rate limit (named values
+            mcp-trust-forwarded-for, mcp-rate-limit-key), 8 backend headers
+            (fragment mcp-backend-headers).
             outbound: response headers (fragment mcp-response-headers), trace.
             No tool-argument validation: validate-content needs API operations
             and MCP servers have none (docs/TOOL-VALIDATION.md shows how to add it).
@@ -81,10 +83,28 @@
       <metadata name="userOid" value="@((string)context.Variables[&quot;caller-oid&quot;])" />
       <metadata name="clientAppId" value="@((string)context.Variables[&quot;caller-app-id&quot;])" />
     </trace>
-    <!-- Per client IP throttle: RATE_LIMIT_CALLS calls per RATE_LIMIT_PERIOD
-         seconds, then 429 with Retry-After. Protects the backend and the user's
-         Azure DevOps request budget. -->
-    <rate-limit-by-key calls="__RATE_LIMIT_CALLS__" renewal-period="__RATE_LIMIT_PERIOD__" counter-key="@(&quot;ado-mcp|&quot; + context.Request.IpAddress)" retry-after-header-name="Retry-After" />
+    <!-- Rate-limit key. Client IP: the TCP peer, or behind a reverse proxy
+         (named value mcp-trust-forwarded-for = true) the LAST X-Forwarded-For
+         entry, the one the proxy appended (earlier entries come from the client
+         and can be forged); the port is removed. With named value
+         mcp-rate-limit-key = user the key is the token's oid instead (client IP
+         without a token). The token is not validated here, so a caller can
+         invent oids: use "user" only with validate-azure-ad-token. -->
+    <set-variable name="client-ip" value="@{
+      var ip = context.Request.IpAddress;
+      if (&quot;{{mcp-trust-forwarded-for}}&quot; == &quot;true&quot;) {
+        var hops = context.Request.Headers.GetValueOrDefault(&quot;X-Forwarded-For&quot;, &quot;&quot;).Split(',');
+        var last = hops[hops.Length - 1].Trim();
+        if (last.StartsWith(&quot;[&quot;) &amp;&amp; last.IndexOf(']') &gt; 0) { last = last.Substring(1, last.IndexOf(']') - 1); }
+        else if (last.Split(':').Length == 2) { last = last.Split(':')[0]; }
+        if (last.Length &gt; 0) { ip = last; }
+      }
+      return ip;
+    }" />
+    <!-- Throttle: RATE_LIMIT_CALLS calls per RATE_LIMIT_PERIOD seconds per key,
+         then 429 with Retry-After. Protects the backend and the user's Azure
+         DevOps request budget. -->
+    <rate-limit-by-key calls="__RATE_LIMIT_CALLS__" renewal-period="__RATE_LIMIT_PERIOD__" counter-key="@(&quot;{{mcp-rate-limit-key}}&quot; == &quot;user&quot; &amp;&amp; (string)context.Variables[&quot;caller-oid&quot;] != &quot;none&quot; ? &quot;ado-mcp|oid|&quot; + (string)context.Variables[&quot;caller-oid&quot;] : &quot;ado-mcp|&quot; + (string)context.Variables[&quot;client-ip&quot;])" retry-after-header-name="Retry-After" />
     <!-- Backend headers: strip spoofable forwarding, identity and trace headers;
          add X-MCP-Readonly / X-MCP-Toolsets from named values (fragment, shared
          with native-mcp.xml). -->

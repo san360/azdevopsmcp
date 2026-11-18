@@ -43,6 +43,8 @@ raw/
 infra/*.json
 infra/aigateway/*.json
 infra/modules/*.json
+infra/edge/*.json
+infra/edge/modules/*.json
 !infra/**/*.example.json
 
 # Editors and tools (settings can hold environment values)
