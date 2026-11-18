@@ -141,14 +141,14 @@ and [clients/](clients/README.md).
 - **Codex probes with a body-less `GET`** before discovery. On the earlier HTTP-proxy
   version, a policy that read the missing body returned `500`, and Codex aborted (*OAuth
   metadata discovery failed*). The MCP server now answers `405` natively; the probe checks it.
-- **Native pass-through:** Claude Code fails as expected (no DCR, or `AADSTS9010010` with a
-  client ID). Copilot CLI connects through its built-in Entra account broker, a client
-  capability independent of the gateway (interactive only). Codex connected only while the
-  working setup served its OAuth endpoints at the gateway root: it falls back to the host
-  root and borrowed them. Since the working setup moved under its own path
-  (`/ado-mcp-proxy/oauth`), Codex fails on the native URL too (`POST /register` `404`).
-  These do not change the root cause: any client that sends the
-  gateway URL as `resource` to Entra fails.
+- **Native pass-through:** Claude Code fails (no DCR; with a client ID it falls back to the
+  gateway's `/authorize`, `404` on a gateway without this repository's facade). Codex fails
+  (`POST /register` `404`). VS Code and Copilot CLI connect through Microsoft's own account
+  sign-in (account broker) and never send the gateway URL as `resource`; headless Copilot CLI
+  works only where the broker signs in silently. These are Microsoft-client features, not a
+  fix: confirmed on a second, plain API Management instance with nothing from this
+  repository deployed. Any client that uses standard MCP OAuth fails, and the root cause
+  stands: Entra rejects the gateway URL as `resource` for the Azure DevOps scope.
 - **Version negotiation:** Copilot CLI and Claude Code first offer MCP `2026-07-28`. The server
   answers `400`, and both fall back. The native API turned one such `400` into
   `500 ProtocolViolation: Content length mismatch`; the earlier HTTP proxy passed it through

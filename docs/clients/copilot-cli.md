@@ -15,7 +15,7 @@ through the MCP server and listed the project.
 | `resource` | Sends the gateway URL; APIM replaces it ([change 4](../CLIENTS-APIM-CHANGES.md#change-4-authorize-translates-the-resource-name)) |
 | Sign-in trigger | Interactive only: `/mcp` → select the server → sign in. `copilot -p` skips servers that still need sign-in (*Browser-based OAuth required*) |
 | Token storage | OS credential store (`copilot-mcp-oauth`) |
-| Entra as authorization server | When the PRM names Microsoft Entra directly (native URL), Copilot CLI uses its **own Entra account broker** instead of DCR |
+| Entra as authorization server | When the PRM names Microsoft Entra directly (native URL), Copilot CLI uses its **own Entra account broker** (Windows: Web Account Manager) instead of DCR, as the first-party client `aebc6443-996d-45c2-90f0-388ff96faa56`. It sends no gateway `resource`, so `AADSTS9010010` does not occur. On a device joined to the organization's tenant the broker signs in **silently**, even with `-p` |
 
 ## Configure (session-only, nothing written to your settings)
 
@@ -50,8 +50,9 @@ copilot --additional-mcp-config "@$env:TEMP\ado-mcp\copilot-mcp.json"
    gateway's `/ado-mcp-proxy/oauth/authorize`**. Sign in with the organization's tenant
    account. If the default browser profile is the wrong account, copy the sign-in URL into
    the right profile. Expected: `ado_proxy — connected`.
-2. Optional, regular setup: select `ado_native` and sign in. Expected in the lab:
-   `Signing in with your Microsoft Entra account (account broker)…` then connected. This is
+2. Optional, regular setup: select `ado_native` and sign in. Expected:
+   `Signing in with your Microsoft Entra account (account broker)…` then connected (with no
+   prompt at all on a device joined to the organization's tenant). This is
    Copilot CLI's built-in Entra support, not the gateway (see
    [the regular setup with these clients](../CLIENTS-APIM-CHANGES.md#the-regular-setup-with-these-clients-what-you-will-see)).
 3. Ask: *"List the Azure DevOps projects I can access."* Then `/exit`.
@@ -75,7 +76,20 @@ accepted by the server and returns projects; no *Rejected by the API gateway* er
 expected ([TOOL-VALIDATION.md](../TOOL-VALIDATION.md)).
 
 With `ado_native` in `-p` mode the lab returned *MCP server "ado_native" requires
-authentication*: the broker sign-in is not reused headless.
+authentication*: the lab tenant has no account on the device, so the broker needs a prompt
+that `-p` cannot show. On a plain API Management instance (nothing from this repository)
+with an organization in the device's own work tenant (Entra joined, `AzureAdPrt: YES`), both
+interactive mode (no prompt) and `-p` (`tools/call` returned projects) worked, because the
+broker signs in silently there (2026-11-18). The debug log shows the path:
+
+```text
+rt_mcp_oauth::protocol authorization server metadata discovery attempt failed {"discovery_url":"https://login.microsoftonline.com/.well-known/oauth-authorization-server/<tenant-id>/v2.0","status":"404 Not Found"}
+rt_mcp_oauth::protocol authorization server metadata discovery attempt failed {"discovery_url":"https://login.microsoftonline.com/.well-known/openid-configuration/<tenant-id>/v2.0","status":"404 Not Found"}
+Signing in with your Microsoft Entra account (account broker)...
+```
+
+This is a client feature for Microsoft's own clients, not a fix of the native setup; see
+[why VS Code and Copilot CLI "work" on the native setup](../CLIENTS-APIM-CHANGES.md#why-vs-code-and-copilot-cli-work-on-the-native-setup).
 
 ## Logs
 

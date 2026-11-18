@@ -132,8 +132,8 @@ behave differently, and what the gateway changes for them:
 
 | Client | Proxy (working setup) | Native (regular setup) |
 |---|---|---|
-| [VS Code](clients/vscode.md) | ✅ | ❌ `AADSTS9010010` |
-| [GitHub Copilot CLI](clients/copilot-cli.md) | ✅ | ⚠️ connects through its own Entra broker (interactive only) |
+| [VS Code](clients/vscode.md) | ✅ | ⚠️ built-in Microsoft account sign-in if the device has a session for the tenant; else ❌ `AADSTS9010010` |
+| [GitHub Copilot CLI](clients/copilot-cli.md) | ✅ | ⚠️ Entra account broker; `-p` only if the broker can sign in silently |
 | [OpenAI Codex CLI](clients/codex.md) | ✅ | ❌ *Dynamic registration failed: HTTP 404* (no metadata; root `/register` does not exist) |
 | [Claude Code](clients/claude-code.md) | ✅ | ❌ no DCR, or `AADSTS9010010` with `--client-id` |
 | [MCP Inspector](clients/mcp-inspector.md) | ✅ | ❌ no DCR, or `AADSTS9010010` with a client ID |
@@ -161,7 +161,9 @@ does not validate tool arguments, and the server accepts `top: 500`
 
 Re-testing after a gateway change: sign out first (`claude mcp logout`, `codex mcp logout`,
 VS Code **Accounts: Sign Out**), because clients cache the authorization server they
-discovered.
+discovered. VS Code's Copilot agent host also loads Copilot CLI's
+`~/.copilot/mcp-config.json`; name test servers distinctly per client so you know which
+definition you are testing.
 
 ## 4. Find a request in the logs
 
@@ -220,7 +222,7 @@ python tools/mcp_probe.py --config tools/probe.local.json --token az --only apim
 | Deployment fails on API `ado-mcp-proxy` after upgrading from a version with an HTTP proxy | An API's type cannot change from HTTP to MCP | Delete the old API first ([GETTING-STARTED](GETTING-STARTED.md#upgrading-from-an-earlier-version)) |
 | Sign-in through the working setup ends with `AADSTS9010010` or *does not support dynamic client registration* | The MCP server's built-in metadata answered the PRM URL: the API `ado-mcp-proxy-prm` is missing | Redeploy; `GET /ado-mcp-proxy/.well-known/oauth-protected-resource/<org>` must name `/ado-mcp-proxy/oauth` as authorization server |
 | One `400` on the first authenticated request of a session | The client offered a newer MCP protocol version; the server refused and the client fell back | Nothing to fix |
-| Copilot CLI `-p`: *Browser-based OAuth required* or *requires authentication* | Headless mode cannot start a browser sign-in | Sign in once interactively (`/mcp`) |
+| Copilot CLI `-p`: *Browser-based OAuth required* or *requires authentication* | Headless mode cannot show a sign-in. On the native URL the account broker signs in silently only for a tenant the device is joined to | Sign in once interactively (`/mcp`); for the working setup the token is then reused headless |
 | Browser opens `https://<gateway>/authorize` and gets `404` | The client cached the authorization server of an older, root-mounted lab version (seen with Claude Code) | Sign out of the server (`claude mcp logout <name>`, `codex mcp logout <name>`) and sign in again |
 | *Dynamic registration failed: HTTP 404* or *Dynamic Client Registration rejected (HTTP 404)* on the proxy | The discovery aliases are missing (`rootDiscoveryAliases = false`, or deleted); Codex and Claude Code then fall back to the gateway root | Redeploy with `rootDiscoveryAliases = true` |
 | Probe: `client: OAuth endpoints under the MCP path (isolation)` fails | The PRM or authorization-server metadata names an issuer or endpoint outside the setup's path (an old policy version is deployed) | Redeploy the current version. To detect leftover root APIs (which this check cannot see), run the root-`404` loop in [GETTING-STARTED](GETTING-STARTED.md#upgrading-from-an-earlier-version) |
