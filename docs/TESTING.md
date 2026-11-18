@@ -211,14 +211,20 @@ python tools/mcp_probe.py --config tools/probe.local.json --token az --only apim
 With the optional edge ([APP-GATEWAY.md](APP-GATEWAY.md)), add targets for the public host
 to `tools/probe.local.json`, for example `agw-proxy` (`https://<host>/ado-mcp-proxy/<org>`),
 `agw-proxy-bare` (`https://<host>/ado-mcp-proxy`) and `agw-native`
-(`https://<host>/ado-mcp-native/<org>`, `expectFailures` like `apim-native`), then:
+(`https://<host>/ado-mcp-native/<org>`, `expectFailures` like `apim-native`). For a second
+host with the custom domain only on App Gateway
+([APP-GATEWAY.md, section 9](APP-GATEWAY.md#9-second-host-custom-domain-only-on-application-gateway))
+add the same three for `<host2>` (`agw2-proxy`, `agw2-proxy-bare`, `agw2-native`); the
+regular setup there fails at discovery, so give `agw2-native`
+`"expectFailures": ["discovery: URLs on the client's host", "client: PRM accepted", "client: authorization server metadata"]`.
+Then:
 
 ```powershell
-python tools/mcp_probe.py --config tools/probe.local.json --token az --only agw-proxy --only agw-proxy-bare --only agw-native --skip-validation
+python tools/mcp_probe.py --config tools/probe.local.json --token az --only agw-proxy --only agw-proxy-bare --only agw-native --only agw2-proxy --only agw2-proxy-bare --only agw2-native --skip-validation
 ```
 
 Expected: the same results as on the plain gateway, and *discovery: URLs on the client's
-host* passes for every target. App Gateway's own view of each request:
+host* passes for every target except `agw2-native`. App Gateway's own view of each request:
 [`docs/kql/appgw-access.kql`](kql/appgw-access.kql). The routing, streaming, timeout and
 rate-limit tests and their results are in
 [APP-GATEWAY.md, section 13](APP-GATEWAY.md#13-test-results).

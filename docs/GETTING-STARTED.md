@@ -106,7 +106,7 @@ Other parameters (defaults are fine for a first run):
 | `readOnly` | `true` | Both setups send `X-MCP-Readonly: true`; the server lists only read-only tools (26 of 43 in the lab, November 2026) |
 | `toolsets` | `''` | Both setups: `X-MCP-Toolsets`, for example `repos,wit` |
 | `rateLimitCalls` / `rateLimitPeriod` | `60` / `60` | Working setup: per-IP rate limit |
-| `trustForwardedFor` | `false` | Behind a reverse proxy (Application Gateway): rate-limit by the client IP the proxy appended to `X-Forwarded-For`, and build metadata URLs from `X-Forwarded-Host`. Never enable when clients reach APIM directly ([APP-GATEWAY.md](APP-GATEWAY.md)) |
+| `trustForwardedFor` | `false` | Behind a reverse proxy (Application Gateway): rate-limit by the client IP the proxy appended to `X-Forwarded-For`, and build metadata URLs from `X-Forwarded-Host` (required for hosts App Gateway forwards to APIM's default host). Never enable when clients reach APIM directly ([APP-GATEWAY.md](APP-GATEWAY.md#9-second-host-custom-domain-only-on-application-gateway)) |
 | `rateLimitKey` | `client-ip` | `user` keys the rate limit on the token's `oid` (pair with token validation) |
 | `mcpRequestBodyBytes` | `4096` | JSON-RPC **request** bytes logged for MCP APIs (0 disables). Response bodies are never logged |
 | `proxyApiPath` | `ado-mcp-proxy` | Working setup's **dedicated path** and MCP server name. The MCP URL, its PRM (`/<path>/.well-known/oauth-protected-resource/...`), its OAuth endpoints (`/<path>/oauth/...`) and its metadata all live under it; nothing is mounted at the gateway root ([Isolation](../README.md#isolation-the-working-setup-owns-one-dedicated-path)) |

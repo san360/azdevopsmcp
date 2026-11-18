@@ -1,14 +1,21 @@
 // Application Gateway in front of API Management (internal mode).
 //
 //   client --TLS {hostName}--> listener (Key Vault certificate)
-//          --path rules-->     backend pool: {hostName}, which the private DNS
-//                              zone resolves to APIM's internal IP
-//          --TLS {hostName}--> APIM (same custom host name and certificate)
+//          --path rules-->     backend pool: {backendHostName}, which a private
+//                              DNS zone resolves to APIM's internal IP
+//          --TLS {backendHostName}--> APIM
 //
-// The host name stays the same end to end, so every URL APIM builds from the
-// request (the MCP 401 resource_metadata, PRM resource, OAuth issuer) is the
-// public one. Only the MCP paths are routed; any other path goes to an empty
-// pool (502), so other APIs on the same APIM instance stay unreachable.
+// One listener, backend pool, backend setting, path map, rewrite set and
+// routing rule per entry of `sites`, so hosts with different backend hosts run
+// side by side:
+//   backendHostName = hostName (APIM has it as custom host): every URL APIM
+//     builds from the request (MCP 401 resource_metadata, PRM resource, OAuth
+//     issuer) is already the public one.
+//   backendHostName = <apim>.azure-api.net (no custom domain on APIM): App
+//     Gateway puts the public host back into the 401 challenge, and the
+//     policies build their URLs from X-Forwarded-Host.
+// Only the MCP paths are routed; any other path goes to an empty pool (502), so
+// other APIs on the same APIM instance stay unreachable.
 
 param appGatewayName string
 param location string = resourceGroup().location
@@ -24,14 +31,16 @@ param skuName string = 'Standard_v2'
 param subnetId string
 param identityId string
 
-@description('Public host name of the listener.')
-param hostName string
+@description('Public hosts, one listener and routing rule each. hostName: public host (listener, SNI). backendHostName: Host sent to APIM, either hostName itself (APIM has it as custom host; recommended) or APIM\'s default *.azure-api.net host (App Gateway then rewrites it back in the 401 challenge). certificateSecretUri: versionless Key Vault secret URI of the certificate for hostName. The first entry keeps the original resource names.')
+@minLength(1)
+param sites site[]
 
-@description('Host App Gateway sends to APIM: the public host (APIM has it as custom host; recommended) or APIM\'s default *.azure-api.net host. With another host, App Gateway rewrites it back in the 401 challenge.')
-param backendHostName string = hostName
-
-@description('Versionless Key Vault secret URI of the certificate for hostName.')
-param certificateSecretUri string
+@export()
+type site = {
+  hostName: string
+  backendHostName: string
+  certificateSecretUri: string
+}
 
 @description('Paths routed to APIM (App Gateway syntax: exact, or ending in /*).')
 param routedPaths array
@@ -59,7 +68,72 @@ resource publicIp 'Microsoft.Network/publicIPAddresses@2024-05-01' = {
 }
 
 var gwId = resourceId('Microsoft.Network/applicationGateways', appGatewayName)
-var rewriteChallenge = toLower(backendHostName) != toLower(hostName)
+
+// The first site keeps the names of the single-host template, so existing
+// gateways update in place.
+func suffix(i int) string => i == 0 ? '' : '-${i + 1}'
+
+func challengeRule(backendHostName string) object => {
+  // APIM names the host it was called on in resource_metadata; clients cannot
+  // reach it, so put the public host back.
+  name: 'challenge-host'
+  ruleSequence: 200
+  conditions: [
+    {
+      variable: 'http_resp_WWW-Authenticate'
+      pattern: '(.*)https://${replace(backendHostName, '.', '\\.')}(.*)'
+      ignoreCase: true
+      negate: false
+    }
+  ]
+  actionSet: {
+    requestHeaderConfigurations: []
+    responseHeaderConfigurations: [
+      {
+        headerName: 'WWW-Authenticate'
+        headerValue: '{http_resp_WWW-Authenticate_1}https://{var_host}{http_resp_WWW-Authenticate_2}'
+      }
+    ]
+  }
+}
+
+var forwardedHostRule = {
+  // The host the client used, for the PRM and OAuth metadata policies (named
+  // value mcp-trust-forwarded-for). Overrides any client value.
+  name: 'forwarded-host'
+  ruleSequence: 100
+  conditions: []
+  actionSet: {
+    requestHeaderConfigurations: [
+      {
+        headerName: 'X-Forwarded-Host'
+        headerValue: '{var_host}'
+      }
+    ]
+    responseHeaderConfigurations: []
+  }
+}
+
+var sitePools = [
+  for (s, i) in sites: {
+    name: 'apim${suffix(i)}'
+    properties: {
+      backendAddresses: [
+        {
+          fqdn: s.backendHostName
+        }
+      ]
+    }
+  }
+]
+
+var unroutedPool = {
+  // Default for unrouted paths: no members, so App Gateway answers 502.
+  name: 'unrouted'
+  properties: {
+    backendAddresses: []
+  }
+}
 
 resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
   name: appGatewayName
@@ -110,10 +184,10 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
       }
     ]
     sslCertificates: [
-      {
-        name: 'custom-host'
+      for (s, i) in sites: {
+        name: i == 0 ? 'custom-host' : 'host${suffix(i)}'
         properties: {
-          keyVaultSecretId: certificateSecretUri
+          keyVaultSecretId: s.certificateSecretUri
         }
       }
     ]
@@ -121,25 +195,7 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
       policyType: 'Predefined'
       policyName: 'AppGwSslPolicy20220101'
     }
-    backendAddressPools: [
-      {
-        name: 'apim'
-        properties: {
-          backendAddresses: [
-            {
-              fqdn: backendHostName
-            }
-          ]
-        }
-      }
-      {
-        // Default for unrouted paths: no members, so App Gateway answers 502.
-        name: 'unrouted'
-        properties: {
-          backendAddresses: []
-        }
-      }
-    ]
+    backendAddressPools: concat(sitePools, [unroutedPool])
     probes: [
       {
         name: 'apim-status'
@@ -159,15 +215,15 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
       }
     ]
     backendHttpSettingsCollection: [
-      {
-        name: 'apim-https'
+      for (s, i) in sites: {
+        name: 'apim-https${suffix(i)}'
         properties: {
           port: 443
           protocol: 'Https'
           cookieBasedAffinity: 'Disabled'
           // APIM only answers its configured host names (404 otherwise) and
           // builds its 401 challenge URL from this host.
-          hostName: backendHostName
+          hostName: s.backendHostName
           pickHostNameFromBackendAddress: false
           requestTimeout: backendTimeoutSeconds
           probe: {
@@ -177,8 +233,8 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
       }
     ]
     httpListeners: [
-      {
-        name: 'https'
+      for (s, i) in sites: {
+        name: 'https${suffix(i)}'
         properties: {
           frontendIPConfiguration: {
             id: '${gwId}/frontendIPConfigurations/public'
@@ -188,22 +244,22 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
           }
           protocol: 'Https'
           sslCertificate: {
-            id: '${gwId}/sslCertificates/custom-host'
+            id: '${gwId}/sslCertificates/${i == 0 ? 'custom-host' : 'host${suffix(i)}'}'
           }
-          hostName: hostName
+          hostName: s.hostName
           requireServerNameIndication: true
         }
       }
     ]
     urlPathMaps: [
-      {
-        name: 'mcp-paths'
+      for (s, i) in sites: {
+        name: 'mcp-paths${suffix(i)}'
         properties: {
           defaultBackendAddressPool: {
             id: '${gwId}/backendAddressPools/unrouted'
           }
           defaultBackendHttpSettings: {
-            id: '${gwId}/backendHttpSettingsCollection/apim-https'
+            id: '${gwId}/backendHttpSettingsCollection/apim-https${suffix(i)}'
           }
           pathRules: [
             {
@@ -211,13 +267,13 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
               properties: {
                 paths: routedPaths
                 backendAddressPool: {
-                  id: '${gwId}/backendAddressPools/apim'
+                  id: '${gwId}/backendAddressPools/apim${suffix(i)}'
                 }
                 backendHttpSettings: {
-                  id: '${gwId}/backendHttpSettingsCollection/apim-https'
+                  id: '${gwId}/backendHttpSettingsCollection/apim-https${suffix(i)}'
                 }
                 rewriteRuleSet: {
-                  id: '${gwId}/rewriteRuleSets/mcp-headers'
+                  id: '${gwId}/rewriteRuleSets/mcp-headers${suffix(i)}'
                 }
               }
             }
@@ -225,71 +281,29 @@ resource appGateway 'Microsoft.Network/applicationGateways@2024-05-01' = {
         }
       }
     ]
+    // X-Forwarded-Host on every site; the challenge rewrite only where APIM is
+    // called on another host than the client used.
     rewriteRuleSets: [
-      {
-        name: 'mcp-headers'
+      for (s, i) in sites: {
+        name: 'mcp-headers${suffix(i)}'
         properties: {
-          rewriteRules: concat(
-            [
-              {
-                // The public host, for the PRM and OAuth metadata policies
-                // (named value mcp-trust-forwarded-for). Overrides any client value.
-                name: 'forwarded-host'
-                ruleSequence: 100
-                conditions: []
-                actionSet: {
-                  requestHeaderConfigurations: [
-                    {
-                      headerName: 'X-Forwarded-Host'
-                      headerValue: '{var_host}'
-                    }
-                  ]
-                  responseHeaderConfigurations: []
-                }
-              }
-            ],
-            rewriteChallenge
-              ? [
-                  {
-                    // APIM names its own host in resource_metadata; clients
-                    // cannot reach it, so put the public host back.
-                    name: 'challenge-host'
-                    ruleSequence: 200
-                    conditions: [
-                      {
-                        variable: 'http_resp_WWW-Authenticate'
-                        pattern: '(.*)https://${replace(backendHostName, '.', '\\.')}(.*)'
-                        ignoreCase: true
-                        negate: false
-                      }
-                    ]
-                    actionSet: {
-                      requestHeaderConfigurations: []
-                      responseHeaderConfigurations: [
-                        {
-                          headerName: 'WWW-Authenticate'
-                          headerValue: '{http_resp_WWW-Authenticate_1}https://{var_host}{http_resp_WWW-Authenticate_2}'
-                        }
-                      ]
-                    }
-                  }
-                ]
-              : []
-          )
+          rewriteRules: toLower(s.backendHostName) == toLower(s.hostName)
+            ? [forwardedHostRule]
+            : [forwardedHostRule, challengeRule(s.backendHostName)]
         }
       }
     ]
     requestRoutingRules: [
-      {
-        name: 'mcp'
+      for (s, i) in sites: {
+        name: 'mcp${suffix(i)}'
         properties: {
           ruleType: 'PathBasedRouting'
-          priority: 100
+          priority: 100 + 10 * i
           httpListener: {
-            id: '${gwId}/httpListeners/https'
+            id: '${gwId}/httpListeners/https${suffix(i)}'
           }
           urlPathMap: {
-            id: '${gwId}/urlPathMaps/mcp-paths'
+            id: '${gwId}/urlPathMaps/mcp-paths${suffix(i)}'
           }
         }
       }

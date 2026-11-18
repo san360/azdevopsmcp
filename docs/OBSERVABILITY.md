@@ -15,7 +15,8 @@ Deployed by `modules/monitoring.bicep` and `modules/apim-observability.bicep`:
   (JSON-RPC method, tool, client, session for native MCP APIs; both setups are APIM MCP servers).
 - **No secrets in logs.** Only an allow-list of headers is logged: `Content-Type`, `Accept`,
   `MCP-Protocol-Version`, `WWW-Authenticate`, `User-Agent`, `traceparent`, `x-mcp-test-run`,
-  `X-Correlation-ID` and `x-apim-request-id`. `Authorization`, cookies and
+  `X-Correlation-ID`, `x-apim-request-id` and `X-Forwarded-Host` (the public host behind
+  Application Gateway). `Authorization`, cookies and
   `Mcp-Session-Id` are never logged. **Response bodies are never logged**, because body
   logging buffers SSE and breaks MCP streaming
   ([expose-existing-mcp-server](https://learn.microsoft.com/azure/api-management/expose-existing-mcp-server)).

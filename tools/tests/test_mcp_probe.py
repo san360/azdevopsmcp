@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import socket
 import sys
 import threading
 import unittest
@@ -101,6 +102,16 @@ class ParsingTests(unittest.TestCase):
         resp = probe.Response(302, {"Location": location}, "")
         self.assertEqual(probe.classify_authorize_response(resp), ("rejected", "invalid_target AADSTS9010010"))
         self.assertEqual(probe.classify_authorize_response(probe.Response(200, {}, "<html>"))[0], "accepted")
+
+    def test_unreachable_endpoint_is_a_result_not_a_crash(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        resp = probe.http_request(f"http://127.0.0.1:{port}/authorize", timeout=5)
+        self.assertEqual(resp.status, 0)
+        outcome, detail = probe.classify_authorize_response(resp)
+        self.assertEqual(outcome, "unreachable")
+        self.assertIn(f"127.0.0.1:{port}", detail)
 
     def test_authorize_url_includes_resource_only_when_given(self):
         url = probe.build_authorize_url("https://as/authorize", client_id="c", redirect_uri="http://localhost",

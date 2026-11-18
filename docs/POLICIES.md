@@ -643,7 +643,7 @@ Runs on the plain API `ado-mcp-proxy-prm` (path
      host comes from the request, so custom domains work. When
      `{{mcp-trust-forwarded-for}}` is `true`, a well-formed last `X-Forwarded-Host` entry
      replaces it (a proxy that sends APIM another host,
-     [APP-GATEWAY.md](APP-GATEWAY.md#9-alternative-no-custom-domain-on-apim)); the same
+     [APP-GATEWAY.md](APP-GATEWAY.md#9-second-host-custom-domain-only-on-application-gateway)); the same
      rule applies to the issuer in `oauth-as-metadata.xml`.
    - `authorization_servers` = `[ scheme + host + "/" + OAUTH_PATH ]`.
    - `bearer_methods_supported` = `["header"]`, `scopes_supported` = `[SCOPE]`,
