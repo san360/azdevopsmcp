@@ -170,5 +170,13 @@ class LoopbackTests(unittest.TestCase):
         self.assertEqual([(c.step, c.ok) for c in run.checks], [("mcp: initialize", False)])
 
 
+class ToolForTargetTests(unittest.TestCase):
+    def test_target_tool_name_overrides_config_tool(self):
+        tool = {"name": "core_list_projects", "arguments": {"top": 5}}
+        self.assertEqual(probe.tool_for_target(tool, {"toolName": "ado_core_list_projects"}),
+                         {"name": "ado_core_list_projects", "arguments": {"top": 5}})
+        self.assertIs(probe.tool_for_target(tool, {}), tool)
+
+
 if __name__ == "__main__":
     unittest.main()

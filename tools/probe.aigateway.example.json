@@ -1,0 +1,46 @@
+{
+  "_comment": "Azure AI Gateway targets. Run with a gateway token: $env:MCP_ACCESS_TOKEN = az account get-access-token --scope https://ai.gateway.azure.com/Data.All --query accessToken -o tsv; python tools/mcp_probe.py --config tools/probe.aigateway.local.json (copy of this file) --token env",
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "clientId": "00000000-0000-0000-0000-000000000000",
+  "scope": "https://ai.gateway.azure.com/Data.All",
+  "tool": {
+    "name": "core_list_projects",
+    "arguments": {
+      "top": 5
+    }
+  },
+  "targets": [
+    {
+      "name": "aigw-obo",
+      "url": "https://<gateway-host>/default/toolservers/ado-obo/mcp",
+      "description": "Azure AI Gateway, OAuth on-behalf-of backend: per-user identity at Azure DevOps.",
+      "toolName": "ado_core_list_projects",
+      "expectFailures": [
+        "discovery: 401 challenge",
+        "client:"
+      ]
+    },
+    {
+      "name": "aigw-mi",
+      "url": "https://<gateway-host>/default/toolservers/ado-mi/mcp",
+      "description": "Azure AI Gateway, gateway managed identity backend (app-only; not an Azure DevOps user).",
+      "toolName": "ado_core_list_projects",
+      "expectFailures": [
+        "discovery: 401 challenge",
+        "client:",
+        "mcp: tools/call"
+      ]
+    },
+    {
+      "name": "aigw-none",
+      "url": "https://<gateway-host>/default/toolservers/ado-none/mcp",
+      "description": "Azure AI Gateway, no backend credential: Azure DevOps answers 401, the gateway 502.",
+      "toolName": "ado_core_list_projects",
+      "expectFailures": [
+        "discovery: 401 challenge",
+        "client:",
+        "mcp: tools/list"
+      ]
+    }
+  ]
+}

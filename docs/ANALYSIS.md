@@ -86,6 +86,9 @@ Assessment:
 | Credential Manager, managed connection | **No**, one shared identity | Yes (with any inbound auth) | Documented pattern in [Secure access to MCP servers](https://learn.microsoft.com/azure/api-management/secure-mcp-servers). Loses user attribution |
 | Credential Manager, user-delegated connections | Partly | No | [`get-authorization-context identity-type="jwt"`](https://learn.microsoft.com/azure/api-management/get-authorization-context-policy) needs a token for audience `https://azure-api.net/authorization-manager` and a per-user consent link. Standard MCP clients cannot do this. Limits: [credentials overview](https://learn.microsoft.com/azure/api-management/credentials-overview) |
 | External authorization broker | Yes | Yes | Most control (consent, storage, refresh), but you build and operate it |
+| **Azure AI Gateway**, OBO backend (GA 2026-11-17) | **Yes** (native OBO, tested) | **No**: no 401 challenge, PRM or DCR; clients need a pre-acquired gateway token | Federated MCP server with `ado_`-prefixed tools, allow-lists, typed policies; no argument validation, no policy XML. See [AI-GATEWAY.md](AI-GATEWAY.md) |
+| Azure AI Gateway, managed identity or API key | **No** | No (key works in a header) | Managed identity is not an Azure DevOps user (`VS30063`); OBO with a key fails (`502`) |
+| APIM OAuth facade in front of AI Gateway (not built) | Yes (OBO in AI Gateway) | Expected yes | `/authorize` translates `resource` to `https://ai.gateway.azure.com` (Entra accepts it, tested); one more hop |
 
 **Recommendation.** For VS Code / GitHub Copilot users who must keep per-user identity
 through APIM today, use the **working setup** with the hardening in the README. Keep native
@@ -157,6 +160,14 @@ and [clients/](clients/README.md).
    `validate-content` (or an equivalent) on native MCP APIs?
 4. Azure DevOps: the organization PRM advertises `resource=https://mcp.dev.azure.com/<org>`, which is not an identifier URI of the app. Will the PRM or the app registration be aligned?
 5. Azure DevOps: is the `500` for a missing service principal expected? A `401`/`403` with guidance would help.
+6. AI Gateway: will MCP endpoints support RFC 9728 discovery (401 challenge with
+   `resource_metadata`, PRM, authorization-server metadata) so that VS Code and other MCP
+   clients can sign in interactively? Any PRM must use a `resource` Entra accepts with the
+   `Data.All` scope (`https://ai.gateway.azure.com`); the gateway URL fails with `AADSTS9010010`.
+7. AI Gateway: tool-argument validation against `inputSchema`, and request headers alongside
+   OBO (for `X-MCP-Readonly`), today rejected as "token authentication and supplemental headers".
+8. AI Gateway: the published 2026-11-01 spec omits `grantType: tokenExchange`, which the service
+   requires for OBO.
 
 ## Sources
 

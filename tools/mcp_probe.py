@@ -608,6 +608,14 @@ def token_claims(token: str) -> dict[str, Any]:
 # --------------------------------------------------------------------- CLI
 
 
+def tool_for_target(tool: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    """The tool a target calls: the config tool, renamed when the target sets toolName.
+
+    Gateways that federate MCP servers (for example Azure AI Gateway) publish tools with a
+    namespace prefix, such as ado_core_list_projects."""
+    return {**tool, "name": target["toolName"]} if target.get("toolName") else tool
+
+
 def load_config(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         config = json.load(handle)
@@ -661,7 +669,9 @@ def main(argv: list[str] | None = None) -> int:
         prm = probe.discovery(name, url)
         if not args.skip_auth:
             probe.client_auth(name, url, prm)
+        default_tool, probe.tool = probe.tool, tool_for_target(probe.tool, target)
         probe.mcp(name, url, target.get("headers"), target.get("toolArguments"))
+        probe.tool = default_tool
         mode = target.get("toolValidation")
         if mode in ("enforced", "none") and not args.skip_validation and config.get("validationCases"):
             probe.tool_validation(name, url, config["validationCases"], mode == "enforced", target.get("headers"))

@@ -61,6 +61,7 @@ the gateway the same way.
 | 5 | [What APIM changes for clients](docs/CLIENTS-APIM-CHANGES.md) | Each gateway change: client behaviour, the error without it, before/after, how to verify |
 | 6 | [Policies](docs/POLICIES.md) | Every APIM policy, element by element |
 | 7 | [Analysis](docs/ANALYSIS.md) | Root cause, reference implementation, options, sources |
+| 8 | [Azure AI Gateway](docs/AI-GATEWAY.md) | Does the new AI Gateway (GA 2026-11-17) solve this natively? Requirement matrix and live test |
 | — | [Glossary](docs/GLOSSARY.md) · [Observability](docs/OBSERVABILITY.md) · [Tool validation](docs/TOOL-VALIDATION.md) | Reference |
 
 ## How a remote MCP server connection works
@@ -403,10 +404,21 @@ docs/TOOL-VALIDATION.md            tool-argument validation design and limits
 docs/OBSERVABILITY.md              where calls and policy events land; KQL guide
 docs/GLOSSARY.md                   PRM, DCR, PKCE, resource indicator, AADSTS codes, APIM terms
 docs/ANALYSIS.md                   root cause, reference implementation, options, sources
+docs/AI-GATEWAY.md                 Azure AI Gateway: requirement matrix, live test, recommendation
+infra/aigateway/                   optional AI Gateway lab (federated MCP server, OBO backend)
 docs/kql/                          ready-made queries
 docs/diagrams/                     diagram sources (.mmd) and SVG / PNG exports
 internal/                          git-ignored local notes (never committed)
 ```
+
+## What about Azure AI Gateway?
+
+Azure AI Gateway (a separate product, GA on 2026-11-17) was tested in the same lab. It keeps
+the user's identity natively with an **on-behalf-of** backend, but its MCP endpoints offer
+**no OAuth discovery**: VS Code and the CLIs cannot sign in by themselves and need a token
+obtained outside MCP. It has tool allow-lists but no argument validation, and it does not
+run APIM policies. For interactive MCP clients, this repository's API Management setup
+remains the working option. Details: [docs/AI-GATEWAY.md](docs/AI-GATEWAY.md).
 
 ## Client compatibility
 
