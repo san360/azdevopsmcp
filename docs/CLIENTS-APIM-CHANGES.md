@@ -444,15 +444,49 @@ Run [`docs/kql/client-signins.kql`](kql/client-signins.kql) a few minutes after 
 
 ## The regular setup with these clients (what you will see)
 
-Nothing above is applied to the native API. Native results with the three CLIs:
+Nothing above is applied to the native API. Two sets of results:
 
-| Client | Native result (observed) | Why |
-|---|---|---|
-| Claude Code (default) | ❌ `Incompatible auth server: does not support dynamic client registration` | The native PRM names Entra; Entra has no DCR |
-| Claude Code `--client-id` | ❌ `AADSTS9010010` | Sends the gateway URL as `resource` to Entra: **the reported error** |
-| VS Code | ❌ `AADSTS9010010` | Same |
-| Copilot CLI (interactive) | ✅ connects | Copilot CLI recognizes Microsoft Entra as the authorization server and signs in with its **own built-in Entra account broker**. It does not use DCR or the gateway `resource`, and APIM saw no `/register` or `/authorize` call. A client feature, not a gateway fix. In `-p` mode the native server still reports *requires authentication*. |
-| Codex CLI | ❌ *Dynamic registration failed: HTTP 404* (after the isolation, 2026-11-18) | Codex ignores the native challenge and finds no PRM at the standard addresses (the native PRM lives under `/ado-mcp-native/.well-known/...`). It then falls back to default endpoints at the host root and `POST /register` gets `404`. Before the working setup moved to its own path, this fallback reached the working setup's root endpoints and Codex "connected" with the lab's public client: a side effect the isolation removed. |
+- **Plain gateway (reference):** a second API Management instance with only a portal-created
+  native MCP server for an organization backed by the user's work tenant, and **nothing from
+  this repository** deployed. This is what a customer sees. Tested 2026-11-18 on a Windows
+  device that is Microsoft Entra joined to that tenant (`dsregcmd /status`: `AzureAdJoined`,
+  `AzureAdPrt: YES`).
+- **Lab:** this repository's `ado-mcp-native`, organization in the lab tenant, where the
+  device has no account.
+
+| Client | Plain gateway (reference) | Lab | Why |
+|---|---|---|---|
+| VS Code (GitHub Copilot), own MCP client (`mcp.json`) | ✅ connects, no prompt; 43 tools | ❌ `AADSTS9010010` (2026-11-17, older VS Code; difference not isolated) | VS Code log: PRM from the `401`, Entra metadata found at the OpenID path-appended URL (`…/v2.0/.well-known/openid-configuration`), then a token within ~3 s with no prompt and no `AADSTS9010010`: VS Code's built-in Microsoft account sign-in, which does not send the gateway URL as `resource` (see below). Gateway log: `401` + PRM with User-Agent `Visual Studio Code/1.147.0`, then `200` |
+| VS Code, Copilot agent host | ✅ after a chat message | not run | VS Code 1.147 runs MCP servers through its Copilot **agent host** (Copilot CLI runtime; User-Agent `vscode-agent-host/1.147.0`), including servers from Copilot CLI's `~/.copilot/mcp-config.json`. Same sign-in as Copilot CLI. *Start Server* before any chat message fails with *Cannot start an MCP server before the session runtime has been created* (not an auth error) |
+| Copilot CLI, interactive | ✅ connects, no prompt | ✅ after an account-broker prompt | Logs: Entra metadata at the path-inserted URLs `404`, then *"Signing in with your Microsoft Entra account (account broker)…"*. Tokens carry the client app `aebc6443-996d-45c2-90f0-388ff96faa56`. No `register` or `authorize` call reaches APIM |
+| Copilot CLI, headless `-p` | ✅ `tools/call` worked | ❌ *requires authentication* | The broker gets a token **silently** only for an account the device is signed in with. Without one it needs a prompt, which `-p` cannot show |
+| Claude Code (default) | ❌ *Incompatible auth server: does not support dynamic client registration* | ❌ same | Entra has no DCR |
+| Claude Code `--client-id` | ❌ browser opens `https://<gateway>/authorize` → `404` | ❌ `AADSTS9010010` (while the lab still served OAuth endpoints at its root) | Claude Code finds no Entra metadata (Entra serves only the OpenID path-appended URL, which Claude Code does not try), falls back to default endpoints on the gateway host, and the plain gateway has none |
+| Codex CLI | ❌ *Dynamic registration failed: HTTP 404* | ❌ same | No metadata at the addresses Codex tries; falls back to `POST /register` at the gateway root |
+| Standard OAuth client (`tools/mcp_probe.py`) | ❌ `AADSTS9010010` | ❌ same | Sends `resource=<gateway URL>` with the Azure DevOps scope: **the reported error** |
+| MCP Inspector | not run | ❌ no DCR, or `AADSTS9010010` with a client ID | As Claude Code |
+
+### Why VS Code and Copilot CLI "work" on the native setup
+
+They are Microsoft's own clients. When the authorization server is Microsoft Entra, they
+skip standard MCP OAuth (dynamic registration, RFC 8707 `resource`) and ask Entra for the
+**scope** `https://mcp.dev.azure.com/.default` through Microsoft's own sign-in (on Windows the
+Web Account Manager broker), as the first-party client `aebc6443-…`. Entra has no gateway
+`resource` to reject, so `AADSTS9010010` never happens, and APIM forwards a valid Azure
+DevOps token. This does not fix the native setup:
+
+- It works only for these clients. Claude Code, Codex, MCP Inspector and any standard OAuth
+  client fail.
+- Headless runs (`copilot -p`, automation) work only where the device can get a token
+  silently, typically a device joined to the organization's tenant. Elsewhere they fail with
+  *requires authentication*.
+- The client app is Microsoft's, not one you register, so you cannot manage its redirect URIs,
+  consent or conditional access per gateway the way you can with the working setup's public
+  client.
+
+A side effect seen on the plain gateway: with no gateway policy, nothing sends
+`X-MCP-Readonly`, so the server exposed its **write** tools too (for example
+`wit_backlog_write`). Both setups in this repository send it through `mcp-backend-headers`.
 
 Two side observations on the native API:
 

@@ -21,7 +21,7 @@ Tested with Claude Code 2.1.322 on Windows (lab, 2026-11-18).
 New-Item -ItemType Directory -Force "$env:TEMP\ado-mcp\claude" | Out-Null; Set-Location "$env:TEMP\ado-mcp\claude"
 claude mcp add --transport http -s local ado-proxy  https://<gateway>/ado-mcp-proxy/<org>
 claude mcp add --transport http -s local ado-native https://<gateway>/ado-mcp-native/<org>
-# Regular setup with a pre-registered client, to reach Entra and reproduce AADSTS9010010:
+# Regular setup with a pre-registered client (registered in the organization's tenant):
 claude mcp add --transport http -s local --client-id <public-client-id> ado-native-clientid https://<gateway>/ado-mcp-native/<org>
 claude mcp list
 ```
@@ -40,15 +40,20 @@ ado-native-clientid: ... (HTTP) - ! Needs authentication
 claude mcp login ado-proxy
 # Authenticated with "ado-proxy". Its tools are now available in Claude Code.
 claude mcp login ado-native-clientid
-# Couldn't complete authentication for "ado-native-clientid": AADSTS9010010: The resource parameter provided
-# in the request doesn't match with the requested scopes.        <- the reproduction
+# The browser opens https://<gateway>/authorize?response_type=code&client_id=...   (no scope, no resource)
+# and the gateway answers 404.                                   <- the native setup cannot sign Claude Code in
 claude mcp list        # ado-proxy: ✔ Connected
 ```
 
-`ado-native-clientid` goes straight to Entra
-(`login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize`) with
-`resource=https://<gateway>/ado-mcp-native/<org>`, and Entra rejects it. `ado-proxy` goes
-to the gateway's `/ado-mcp-proxy/oauth/authorize`, which replaces `resource`.
+`ado-native-clientid` reads the native PRM, which names Entra. Claude Code then looks for
+Entra's metadata at the path-inserted URLs, which Entra does not serve (it only serves
+`…/<tenant-id>/v2.0/.well-known/openid-configuration`, which Claude Code does not try). It falls
+back to default endpoints on the gateway host and opens `https://<gateway>/authorize`, which a
+gateway without this repository's OAuth facade answers with `404` (observed 2026-11-18 on a
+plain API Management instance). Earlier lab runs reported `AADSTS9010010` instead, while the
+lab still served OAuth endpoints at the gateway root. Either way the native setup cannot sign
+Claude Code in. `ado-proxy` goes to the gateway's `/ado-mcp-proxy/oauth/authorize`, which
+replaces `resource`.
 
 To sign in with a specific browser profile, run `claude mcp login ado-proxy --no-browser`
 in a real terminal and open the printed URL yourself (for example

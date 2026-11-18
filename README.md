@@ -43,8 +43,8 @@ side by side, with full telemetry:
 | Listed in APIM under *MCP servers* | ✅ `ado-mcp-native` | ✅ `ado-mcp-proxy` |
 | Client URL | `https://<gateway>/ado-mcp-native/<org>` | `https://<gateway>/ado-mcp-proxy/<org>` |
 | `initialize`, `tools/list`, `tools/call` with a valid token | ✅ | ✅ |
-| Sign-in from VS Code / MCP Inspector / Claude Code | ❌ `AADSTS9010010` or no DCR | ✅ |
-| Sign-in from GitHub Copilot CLI / OpenAI Codex CLI | ⚠️ see [Client compatibility](#client-compatibility) | ✅ |
+| Sign-in from MCP Inspector / Claude Code / OpenAI Codex CLI / any standard OAuth client | ❌ `AADSTS9010010`, no DCR, or `404` | ✅ |
+| Sign-in from VS Code / GitHub Copilot CLI | ⚠️ works only through Microsoft's own account sign-in, see [Client compatibility](#client-compatibility) | ✅ |
 | Who Azure DevOps sees | The signed-in user | The signed-in user |
 
 The working setup builds on [carolga/ado-apim](https://github.com/carolga/ado-apim)
@@ -501,16 +501,18 @@ on this layout. Details, commands and log evidence are in
 
 | Client | Working setup (`/ado-mcp-proxy/<org>`) | Regular setup (`/ado-mcp-native/<org>`) |
 |---|---|---|
-| VS Code (GitHub Copilot) | ✅ sign-in and tools (not re-run on the current layout) | ❌ `AADSTS9010010` |
-| GitHub Copilot CLI | ✅ sign-in, tools | ⚠️ connects in interactive mode through Copilot CLI's own Entra broker (client feature, not the gateway); `-p` reports *requires authentication* |
-| OpenAI Codex CLI | ✅ sign-in, tools | ❌ *Dynamic registration failed: HTTP 404*: no metadata, falls back to `/register` at the gateway root, which no longer exists |
-| Claude Code | ✅ sign-in, connected, `tools/list` | ❌ *does not support dynamic client registration*; with `--client-id` ❌ `AADSTS9010010` |
+| VS Code (GitHub Copilot) | ✅ sign-in and tools (not re-run on the current layout) | ⚠️ connects through VS Code's built-in Microsoft account sign-in when the device has a session for the organization's tenant (plain gateway, 2026-11-18); otherwise ❌ `AADSTS9010010` (lab, 2026-11-17) |
+| GitHub Copilot CLI | ✅ sign-in, tools | ⚠️ connects through its Entra account broker; `-p` (headless) works only if the broker can sign in silently (device joined to the tenant), else *requires authentication* |
+| OpenAI Codex CLI | ✅ sign-in, tools | ❌ *Dynamic registration failed: HTTP 404*: no metadata, falls back to `/register` at the gateway root |
+| Claude Code | ✅ sign-in, connected, `tools/list` | ❌ *does not support dynamic client registration*; with `--client-id` the browser opens `<gateway>/authorize` → `404` |
 | MCP Inspector | ✅ (not re-run on the current layout) | ❌ no DCR, or `AADSTS9010010` with a client ID |
 
-The regular-setup failures are the reported problem. The ⚠️ result does not mean native
-pass-through is fixed: it comes from a client-specific Entra integration. (Before the working
-setup moved to its own path, Codex also "connected" to the native URL by borrowing the
-working setup's root endpoints. The isolation removed that side effect.)
+The regular-setup failures are the reported problem. The ⚠️ results do not mean native
+pass-through is fixed: VS Code and Copilot CLI are Microsoft's own clients and, when the
+authorization server is Entra, sign in with Microsoft's account broker instead of standard
+MCP OAuth, so they never send the gateway URL as `resource`. Every other client fails. The
+native results were confirmed on a second, plain API Management instance with nothing from
+this repository deployed ([details and evidence](docs/CLIENTS-APIM-CHANGES.md#the-regular-setup-with-these-clients-what-you-will-see)).
 
 ## Get started
 
