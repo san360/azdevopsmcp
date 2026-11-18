@@ -10,6 +10,10 @@ targetScope = 'resourceGroup'
 //            Vault meanwhile (APIM takes 30-45 minutes).
 //   Stage 2 (certificateName set): APIM custom host name from Key Vault,
 //            private DNS zone for that host, Application Gateway.
+//
+// defaultHostListeners adds more public hosts to the same Application Gateway
+// that are forwarded to APIM's default *.azure-api.net host (no custom domain
+// on APIM for them), side by side with customHostName.
 
 param location string = resourceGroup().location
 
@@ -70,6 +74,18 @@ param appGatewayBackendHost string = 'custom'
 @description('Configure customHostName on APIM (certificate from Key Vault). Needed for appGatewayBackendHost = custom.')
 param apimCustomDomain bool = true
 
+@description('Public host forwarded to APIM\'s default *.azure-api.net host.')
+type defaultHostListener = {
+  @description('Public host name, for example mcp2.example.com.')
+  hostName: string
+
+  @description('Key Vault certificate for hostName, in keyVaultName.')
+  certificateName: string
+}
+
+@description('Extra public hosts on the same Application Gateway, forwarded to APIM\'s default *.azure-api.net host instead of a custom host on APIM. App Gateway rewrites the 401 challenge for them, and the policies build their URLs from X-Forwarded-Host (needs trustForwardedFor = true in infra/main.bicep). Stage 2 only. See docs/APP-GATEWAY.md.')
+param defaultHostListeners defaultHostListener[] = []
+
 @description('Log Analytics workspace resource ID for Application Gateway logs. Empty skips them.')
 param workspaceId string = ''
 
@@ -81,7 +97,9 @@ param nativeApiPath string = 'ado-mcp-native'
 
 var stage2 = !empty(certificateName)
 var useApimCustomDomain = stage2 && apimCustomDomain
-var backendHost = appGatewayBackendHost == 'custom' ? customHostName : '${apimName}.azure-api.net'
+var apimDefaultHost = '${apimName}.azure-api.net'
+var backendHost = appGatewayBackendHost == 'custom' ? customHostName : apimDefaultHost
+var useDefaultHost = stage2 && (appGatewayBackendHost == 'apim-default' || !empty(defaultHostListeners))
 
 // Everything either setup serves, nothing else. The native discovery locations
 // are routed too, so clients get APIM's 404 there exactly as without a proxy.
@@ -153,11 +171,13 @@ module dns 'modules/private-dns.bicep' = if (useApimCustomDomain) {
   }
 }
 
-module dnsDefaultHost 'modules/private-dns.bicep' = if (stage2 && appGatewayBackendHost == 'apim-default') {
+// A zone named after the instance's gateway host, not azure-api.net: other
+// *.azure-api.net names (other APIM instances, this instance's portal and
+// management hosts) keep resolving through public DNS in the network.
+module dnsDefaultHost 'modules/private-dns.bicep' = if (useDefaultHost) {
   name: 'edge-private-dns-default-host'
   params: {
-    zoneName: 'azure-api.net'
-    recordName: apimName
+    zoneName: apimDefaultHost
     apimPrivateIp: apim.outputs.privateIpAddress
     vnetId: network.outputs.vnetId
   }
@@ -171,9 +191,20 @@ module appGateway 'modules/appgw.bicep' = if (stage2) {
     skuName: appGatewaySku
     subnetId: network.outputs.appGatewaySubnetId
     identityId: vault.outputs.appGatewayIdentityId
-    hostName: customHostName
-    backendHostName: backendHost
-    certificateSecretUri: certificateSecretUri
+    sites: concat(
+      [
+        {
+          hostName: customHostName
+          backendHostName: backendHost
+          certificateSecretUri: certificateSecretUri
+        }
+      ],
+      map(defaultHostListeners, l => {
+        hostName: l.hostName
+        backendHostName: apimDefaultHost
+        certificateSecretUri: '${vault.outputs.vaultUri}secrets/${l.certificateName}'
+      })
+    )
     routedPaths: routedPaths
     backendTimeoutSeconds: backendTimeoutSeconds
     responseBuffering: responseBuffering
@@ -190,3 +221,4 @@ output apimPrivateIp string = apim.outputs.privateIpAddress
 output keyVaultUri string = vault.outputs.vaultUri
 output appGatewayPublicIp string = stage2 ? appGateway!.outputs.publicIpAddress : ''
 output publicBaseUrl string = 'https://${customHostName}'
+output defaultHostBaseUrls string[] = map(defaultHostListeners, l => 'https://${l.hostName}')

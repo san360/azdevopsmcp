@@ -2,7 +2,8 @@
 // internal load balancer.
 //   Custom host (recommended): zone = the public host itself, record '@', so no
 //     other name of the public domain is shadowed in this network.
-//   Default host: zone azure-api.net, record = the APIM instance name.
+//   Default host: zone = the instance's gateway host <apim>.azure-api.net,
+//     record '@', so other *.azure-api.net names still resolve publicly.
 
 param zoneName string
 param recordName string = '@'

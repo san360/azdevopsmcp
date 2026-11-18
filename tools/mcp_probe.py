@@ -64,7 +64,7 @@ ADO_ERROR = re.compile(r"\b(?:VS|TF)\d{5,6}\b")
 
 @dataclasses.dataclass
 class Response:
-    status: int
+    status: int  # 0: no HTTP response (DNS, connect or TLS failure); body says why
     headers: dict[str, str]
     body: str
 
@@ -97,6 +97,11 @@ def http_request(
             return Response(resp.status, dict(resp.headers.items()), resp.read(MAX_BODY).decode("utf-8", "replace"))
     except urllib.error.HTTPError as err:
         return Response(err.code, dict(err.headers.items()), err.read(MAX_BODY).decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError) as err:
+        # For example an endpoint on a host clients cannot reach (an internal APIM host
+        # behind Application Gateway): report it as a failed check instead of aborting.
+        reason = getattr(err, "reason", err)
+        return Response(0, {}, f"unreachable: {urllib.parse.urlsplit(url).netloc}: {reason}")
 
 
 def parse_resource_metadata(www_authenticate: str | None) -> str | None:
@@ -188,6 +193,8 @@ def classify_authorize_response(resp: Response) -> tuple[str, str]:
     if codes:
         error = urllib.parse.parse_qs(urllib.parse.urlsplit(location).query).get("error", [""])[0]
         return "rejected", f"{error or 'error'} {','.join(codes)}".strip()
+    if resp.status == 0:
+        return "unreachable", resp.body
     if resp.status == 200:
         return "accepted", "sign-in page served"
     if resp.status in (301, 302, 303, 307, 308):
@@ -355,14 +362,15 @@ class Probe:
         # Some clients (OpenAI Codex) probe the MCP URL with a body-less GET before discovery.
         # The spec allows 401 or 405; a 5xx aborts their sign-in.
         get = http_request(url, headers={"Accept": "text/event-stream", "x-mcp-test-run": self.run_id})
-        self._add(name, "discovery: GET without token is not 5xx", get.status < 500,
-                  f"HTTP {get.status}", get.header("x-apim-request-id"))
+        self._add(name, "discovery: GET without token is not 5xx", 0 < get.status < 500,
+                  f"HTTP {get.status}" if get.status else get.body, get.header("x-apim-request-id"))
 
         prm_resp = http_request(metadata_url, headers={"Accept": "application/json"})
         prm = _json(prm_resp.body) if prm_resp.status == 200 else None
         if not isinstance(prm, dict):
             self._add(name, "discovery: advertised PRM", False,
-                      f"GET {metadata_url} -> HTTP {prm_resp.status}", prm_resp.header("x-apim-request-id"))
+                      f"GET {metadata_url} -> {f'HTTP {prm_resp.status}' if prm_resp.status else prm_resp.body}",
+                      prm_resp.header("x-apim-request-id"))
             return None
         self._add(name, "discovery: advertised PRM", True,
                   f"resource={prm.get('resource')} scopes={prm.get('scopes_supported')} "
@@ -637,7 +645,8 @@ def token_from_browser(tenant: str, client_id: str, scope: str, timeout: float =
     }).encode()
     resp = http_request(f"{authority}/token", method="POST", body=form,
                         headers={"Content-Type": "application/x-www-form-urlencoded"})
-    payload = json.loads(resp.body or "{}")
+    payload = _json(resp.body) if resp.status else {"error": resp.body}
+    payload = payload if isinstance(payload, dict) else {}
     if "access_token" not in payload:
         raise SystemExit(f"token exchange failed: {payload.get('error')} {shorten(payload.get('error_description', ''))}")
     return payload["access_token"]

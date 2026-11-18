@@ -80,6 +80,8 @@ var loggedHeaders = [
   'x-mcp-test-run'
   'X-Correlation-ID'
   'x-apim-request-id'
+  // Behind Application Gateway: the public host the client used (APIM may be called on its default host).
+  'X-Forwarded-Host'
 ]
 
 module apimService 'modules/apim.bicep' = if (createApim) {

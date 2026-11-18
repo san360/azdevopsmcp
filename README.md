@@ -65,7 +65,7 @@ the gateway the same way.
 | 6 | [Policies](docs/POLICIES.md) | Every APIM policy, element by element |
 | 7 | [Analysis](docs/ANALYSIS.md) | Root cause, reference implementation, options, sources |
 | 8 | [Azure AI Gateway](docs/AI-GATEWAY.md) | Does the new AI Gateway (GA 2026-11-17) solve this natively? Requirement matrix and live test |
-| 9 | [Behind Application Gateway](docs/APP-GATEWAY.md) | Custom domain, APIM in internal mode, App Gateway routing, timeouts, rate limiting behind a proxy, test results |
+| 9 | [Behind Application Gateway](docs/APP-GATEWAY.md) | Custom domain, APIM in internal mode, App Gateway routing, timeouts, rate limiting behind a proxy, a second host with the custom domain only on App Gateway, test results |
 | — | [Glossary](docs/GLOSSARY.md) · [Observability](docs/OBSERVABILITY.md) · [Tool argument validation (optional)](docs/TOOL-VALIDATION.md) | Reference |
 
 ## How a remote MCP server connection works

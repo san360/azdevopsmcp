@@ -16,3 +16,12 @@ param backendTimeoutSeconds = 240
 param responseBuffering = false
 // Log Analytics workspace resource ID (output workspaceId of infra/main.bicep).
 param workspaceId = ''
+// Optional, stage 2: more public hosts with the custom domain only on Application Gateway,
+// forwarded to APIM's default <apim-name>.azure-api.net host (docs/APP-GATEWAY.md section 9).
+// Needs trustForwardedFor = true in infra/main.bicep.
+param defaultHostListeners = [
+  // {
+  //   hostName: 'mcp2.example.com'
+  //   certificateName: 'mcp2-example-com'
+  // }
+]
