@@ -1,30 +1,67 @@
-.local/
-captures/
-logs/
-raw/
+# -----------------------------------------------------------------------------
+# Never commit real environment values, tokens, tenant/app IDs, hostnames,
+# organization names or internal material. Commit only the *.example.* files.
+# -----------------------------------------------------------------------------
+
+# Internal material (customer email, internal links, unsanitized lab captures)
+internal/
 report/
-__pycache__/
-*.py[cod]
-.venv/
+
+# Local configuration with real values (config only, still never committed)
+*.local.*
+.local/
 .env
 .env.*
 !.env.example
-*.local.json
-*.local.bicepparam
-*.local.*
-*.log
-*.jsonl
-*.har
+
+# HTTP walkthrough environments (commit only http-client.env.example.json)
+http-client.env.json
+*private.env.json
+http-client.cookies
+.httpyac/
+*.httpyac.cache
+
+# Tokens, keys and certificates
+*token*.txt
+*token*.json
+*.jwt
 *.pem
 *.pfx
 *.key
+*.cer
+*.crt
+
+# Lab captures and logs (may contain headers, IDs or response bodies)
+captures/
+logs/
+raw/
+*.log
+*.jsonl
+*.har
+
+# Bicep build output (compiled ARM JSON)
 infra/*.json
-!infra/*.example.json
+infra/aigateway/*.json
+infra/modules/*.json
+!infra/**/*.example.json
 
-# Internal material (customer email, internal links, unsanitized lab captures). Never commit.
-internal/
+# Editors and tools (settings can hold environment values)
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.azure/
 
-# HTTP walkthrough environments with real values and tokens (commit only the .example file).
-http-client.env.json
-http-client.private.env.json
-.vscode/settings.json
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Node (npx/httpyac/mermaid-cli)
+node_modules/
+
+# OS and temporary files
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
