@@ -11,6 +11,10 @@ param apimName string
 param apiName string
 param apiPath string
 param displayName string
+
+@description('Shown in the APIM portal next to the MCP server.')
+param apiDescription string = ''
+
 param backendName string
 param appInsightsLoggerId string
 param loggedHeaders array
@@ -35,6 +39,7 @@ resource mcp 'Microsoft.ApiManagement/service/apis@2025-09-01-preview' = {
   properties: {
     type: 'mcp'
     displayName: displayName
+    description: apiDescription
     path: apiPath
     protocols: [
       'https'

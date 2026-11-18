@@ -158,8 +158,8 @@ Authorization: Bearer {{token}}
 # WHAT  : Runs core_list_projects as the signed-in user.
 # EXPECT: HTTP 200, SSE. data: {"result":{"content":[{"type":"text","text":"[{\"id\":\"<project-id>\",\"name\":\"<project>\",...}]"}]},"id":3,...}
 #         The data plane works and Azure DevOps sees the real user. Only sign-in is broken.
-# STEP 11 (validation) - On this API, top: 500 is NOT rejected by the gateway (native MCP
-#         APIs cannot run validate-content). Change "top" to 500 and the server answers.
+# STEP 11 (validation) - top: 500 is NOT rejected by the gateway (MCP servers cannot run
+#         validate-content; neither setup validates). Change "top" to 500 and the server answers.
 # LOGS  : mcp-calls-app-insights.kql (gen_ai.tool.name per call).
 # @name toolsCall
 POST {{mcpUrl}}

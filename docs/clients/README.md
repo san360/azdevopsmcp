@@ -5,15 +5,15 @@ Step-by-step setup and test instructions for each MCP client, against both lab U
 | Setup | URL | Expected |
 |---|---|---|
 | Regular (native pass-through) | `https://<gateway>/ado-mcp-native/<org>` | Sign-in fails (the reproduction), except where noted |
-| Working (proxy) | `https://<gateway>/ado-mcp-proxy/<org>` | Sign-in and tool calls work |
+| Working (MCP server + PRM/OAuth compatibility APIs) | `https://<gateway>/ado-mcp-proxy/<org>` | Sign-in and tool calls work |
 
 | Client | Guide | Proxy | Native | Evidence |
 |---|---|---|---|---|
-| GitHub Copilot CLI 1.0.113 | [copilot-cli.md](copilot-cli.md) | ✅ sign-in, `tools/list`, `tools/call`, validation error shown | ⚠️ connects in interactive mode through its own Entra broker; `-p` reports *requires authentication* | Lab, 2026-11-18 |
-| OpenAI Codex CLI 0.167.0 | [codex.md](codex.md) | ✅ sign-in, `tools/call`, validation error shown | ⚠️ connects **only** because the lab's OAuth endpoints are on the same gateway host | Lab, 2026-11-18 |
-| Claude Code 2.1.322 | [claude-code.md](claude-code.md) | ✅ sign-in, connected, `tools/list` | ❌ *no DCR*; with `--client-id` ❌ `AADSTS9010010` | Lab, 2026-11-18. Agent `tools/call` not run (no model reachable from the lab) |
-| VS Code (GitHub Copilot agent mode) | [vscode.md](vscode.md) | ✅ | ❌ `AADSTS9010010` | Lab, 2026-11-17 |
-| MCP Inspector | [mcp-inspector.md](mcp-inspector.md) | ✅ | ❌ *no DCR*, or `AADSTS9010010` with a client ID | Lab, 2026-11-17 |
+| GitHub Copilot CLI 1.0.113 | [copilot-cli.md](copilot-cli.md) | ✅ sign-in, `tools/list`, `tools/call` | ⚠️ connects in interactive mode through its own Entra broker; `-p` reports *requires authentication* | Lab, 2026-11-18. Re-verified with 1.0.114 on the current layout (MCP server): `/mcp` sign-in, then `copilot -p` called `core_list_projects` |
+| OpenAI Codex CLI 0.167.0 | [codex.md](codex.md) | ✅ sign-in, `tools/call` | ❌ *Dynamic registration failed: HTTP 404* (it used to borrow the working setup's root endpoints; no longer possible) | Lab, 2026-11-18. Sign-in re-verified on the current layout (`Auth: OAuth`; fresh discovery reaches `/ado-mcp-proxy/oauth/authorize`); `tools/call` was verified on the earlier HTTP-proxy layout |
+| Claude Code 2.1.322 | [claude-code.md](claude-code.md) | ✅ sign-in, connected, `tools/list` | ❌ *no DCR*; with `--client-id` ❌ `AADSTS9010010` | Lab, 2026-11-18. Re-verified on the current layout: `claude mcp list` → connected; fresh discovery reaches `/ado-mcp-proxy/oauth/authorize` (needed `claude mcp logout` first). Agent `tools/call` not run (no model reachable from the lab) |
+| VS Code (GitHub Copilot agent mode) | [vscode.md](vscode.md) | ✅ | ❌ `AADSTS9010010` | Lab, 2026-11-17; not re-run on the current layout |
+| MCP Inspector | [mcp-inspector.md](mcp-inspector.md) | ✅ | ❌ *no DCR*, or `AADSTS9010010` with a client ID | Lab, 2026-11-17; not re-run on the current layout |
 
 Why each client behaves this way, and what APIM changes make the working setup work for it:
 [CLIENTS-APIM-CHANGES.md](../CLIENTS-APIM-CHANGES.md).
@@ -52,10 +52,10 @@ then used. See [OBSERVABILITY.md](../OBSERVABILITY.md) for the tables behind it.
 
 ## A good first prompt
 
-> List the Azure DevOps projects I can access. Then call core_list_projects with top set to
-> 500 and show me the exact error.
+> List the Azure DevOps projects I can access.
 
-The first part proves sign-in and `tools/call`. The second part shows the gateway's
-[tool argument validation](../TOOL-VALIDATION.md): on the proxy the agent receives
-`Invalid arguments for tool core_list_projects: top violates maximum. Rejected by the API
-gateway before reaching the server.` On the native URL, the server accepts `top: 500`.
+It proves sign-in and `tools/call`. Earlier versions of these guides also asked for
+`core_list_projects` with `top` set to 500 and showed the gateway's validation error. That
+error is no longer expected: the gateway does not validate tool arguments, and the server
+accepts `top: 500` and returns projects, on both setups
+([TOOL-VALIDATION.md](../TOOL-VALIDATION.md)).

@@ -1,24 +1,28 @@
 <!--
   POLICY  : oauth-as-metadata.xml (working setup; OAuth discovery step 2)
   PURPOSE : Publishes OAuth authorization-server metadata that names APIM as the
-            issuer, with /authorize, /token and /register as APIM operations that
-            front Microsoft Entra (oauth-authorize.xml, oauth-token.xml,
-            oauth-register.xml).
-  RUNS ON : API "ado-mcp-oauth-compat" (host root), operations
+            issuer, under the working setup's dedicated path, with /authorize,
+            /token and /register as APIM operations that front Microsoft Entra
+            (oauth-authorize.xml, oauth-token.xml, oauth-register.xml).
+  RUNS ON : API "ado-mcp-proxy-oauth" (path ado-mcp-proxy/oauth), operations
             GET /.well-known/oauth-authorization-server and
-            GET /.well-known/openid-configuration. Called after the PRM, because
-            PRM authorization_servers is the gateway origin.
+            GET /.well-known/openid-configuration (path-appended to the issuer),
+            and, when rootDiscoveryAliases is on, the path-inserted aliases
+            GET /.well-known/oauth-authorization-server/ado-mcp-proxy/oauth and
+            GET /.well-known/openid-configuration/ado-mcp-proxy/oauth. Called
+            after the PRM, whose authorization_servers is this issuer.
   INPUT   : Anonymous GET, no body, no token.
-  OUTPUT  : 200 JSON answered by APIM: issuer = request origin, endpoints on that
-            origin, response type code, PKCE S256, public clients (auth method
-            none), scope = Azure DevOps MCP scope.
+  OUTPUT  : 200 JSON answered by APIM: issuer = {origin}/ado-mcp-proxy/oauth,
+            endpoints under the issuer, response type code, PKCE S256, public
+            clients (auth method none), scope = Azure DevOps MCP scope.
   WHY     : RFC 8414 (s3.3: issuer must match the URL the metadata was derived
             from) and MCP authorization (clients discover endpoints here and must
-            see S256 support). The origin comes from the request, so the default
-            host and custom domains both work.
+            see S256 support). The issuer has a path, so no endpoint of this
+            setup sits at the gateway root. The origin comes from the request, so
+            the default host and custom domains both work.
   VERIFY  : AppTraces step as-metadata (docs/kql/policy-traces.kql,
             docs/kql/client-signins.kql).
-  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE, OAUTH_PATH).
   DETAILS : docs/POLICIES.md
 -->
 <policies>
@@ -47,7 +51,7 @@
       </set-header>
       <set-body>@{
         var url = context.Request.OriginalUrl;
-        var issuer = url.Scheme + Uri.SchemeDelimiter + url.Host;
+        var issuer = url.Scheme + Uri.SchemeDelimiter + url.Host + "/__OAUTH_PATH__";
         var meta = new JObject();
         meta["issuer"] = issuer;
         meta["authorization_endpoint"] = issuer + "/authorize";

@@ -24,9 +24,10 @@ replaces the user's identity with a shared one.
 
 1. A **reproduction** of the failure (regular setup), with raw responses, telemetry and a
    root-cause analysis.
-2. A **working setup** where APIM stays a transparent, governed proxy. It answers OAuth
-   discovery itself and translates one parameter (`resource`) on the way to Entra. The
-   user's own Azure DevOps token flows through unchanged, for any number of organizations.
+2. A **working setup** that uses the same APIM MCP server feature, plus a few plain APIs
+   under its own path. They answer OAuth discovery and translate one parameter (`resource`)
+   on the way to Entra. The user's own Azure DevOps token flows through unchanged, for any
+   number of organizations.
 3. **Tooling** to prove it: Bicep, an end-to-end probe, KQL queries, and step-by-step tests
    with VS Code, GitHub Copilot CLI, OpenAI Codex CLI, Claude Code, MCP Inspector and curl.
 
@@ -38,7 +39,8 @@ side by side, with full telemetry:
 
 | | Regular setup | Working setup |
 |---|---|---|
-| APIM feature | Native MCP pass-through ("expose an existing MCP server") | Plain HTTP API proxy + OAuth compatibility endpoints |
+| APIM feature | MCP server, native pass-through ("expose an existing MCP server") | The same MCP server feature + plain HTTP APIs for PRM and OAuth compatibility |
+| Listed in APIM under *MCP servers* | ✅ `ado-mcp-native` | ✅ `ado-mcp-proxy` |
 | Client URL | `https://<gateway>/ado-mcp-native/<org>` | `https://<gateway>/ado-mcp-proxy/<org>` |
 | `initialize`, `tools/list`, `tools/call` with a valid token | ✅ | ✅ |
 | Sign-in from VS Code / MCP Inspector / Claude Code | ❌ `AADSTS9010010` or no DCR | ✅ |
@@ -56,14 +58,14 @@ the gateway the same way.
 |---|---|---|
 | 1 | This README | What the problem is, why a gateway, how both setups work (10 minutes) |
 | 2 | [Getting started](docs/GETTING-STARTED.md) | Deploy the lab step by step, with expected output |
-| 3 | [Testing](docs/TESTING.md) | Probe, raw protocol with curl/PowerShell, logs, validation tests |
+| 3 | [Testing](docs/TESTING.md) | Probe, raw protocol with curl/PowerShell, logs, client checklist |
 | 3a | [Step-by-step `.http` walkthroughs](http/README.md) | Every request of the sign-in and MCP flow, native vs. working, side by side |
 | 4 | [Client guides](docs/clients/README.md) | VS Code, GitHub Copilot CLI, OpenAI Codex CLI, Claude Code, MCP Inspector |
 | 5 | [What APIM changes for clients](docs/CLIENTS-APIM-CHANGES.md) | Each gateway change: client behaviour, the error without it, before/after, how to verify |
 | 6 | [Policies](docs/POLICIES.md) | Every APIM policy, element by element |
 | 7 | [Analysis](docs/ANALYSIS.md) | Root cause, reference implementation, options, sources |
 | 8 | [Azure AI Gateway](docs/AI-GATEWAY.md) | Does the new AI Gateway (GA 2026-11-17) solve this natively? Requirement matrix and live test |
-| — | [Glossary](docs/GLOSSARY.md) · [Observability](docs/OBSERVABILITY.md) · [Tool validation](docs/TOOL-VALIDATION.md) | Reference |
+| — | [Glossary](docs/GLOSSARY.md) · [Observability](docs/OBSERVABILITY.md) · [Tool argument validation (optional)](docs/TOOL-VALIDATION.md) | Reference |
 
 ## How a remote MCP server connection works
 
@@ -186,14 +188,23 @@ event: message
 data: {"result":{"content":[{"type":"text","text":"[{\"id\":\"<project-id>\",\"name\":\"<project>\",\"url\":\"https://dev.azure.com/<org>/_apis/projects/<project-id>\",\"state\":\"WellFormed\",\"visibility\":\"Private\",…}]"}]},"id":3,"jsonrpc":"2.0"}
 ```
 
-**5. The working setup.** APIM serves PRM and authorization-server metadata, and its
-`/authorize` sends Entra a `resource` that matches the scope:
+**5. The working setup.** It is the same kind of APIM MCP server, so APIM returns the same
+kind of challenge. The difference: a plain API of the working setup answers the PRM URL
+that the challenge names, and that PRM names the gateway's OAuth facade (under the setup's
+own path) as authorization server. The facade's `/authorize` then sends Entra a `resource`
+that matches the scope:
+
+```http
+POST https://<gateway>/ado-mcp-proxy/<org>
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer resource_metadata="https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>"
+```
 
 ```json
-GET https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>
+GET https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>
 {
   "resource": "https://<gateway>/ado-mcp-proxy/<org>",
-  "authorization_servers": [ "https://<gateway>" ],
+  "authorization_servers": [ "https://<gateway>/ado-mcp-proxy/oauth" ],
   "bearer_methods_supported": [ "header" ],
   "scopes_supported": [ "https://mcp.dev.azure.com/.default" ],
   "resource_name": "Azure DevOps MCP via API Management"
@@ -201,15 +212,15 @@ GET https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>
 ```
 
 ```http
-GET https://<gateway>/authorize?client_id=<public-client-id>&…&resource=https://<gateway>/ado-mcp-proxy/<org>
+GET https://<gateway>/ado-mcp-proxy/oauth/authorize?client_id=<public-client-id>&…&resource=https://<gateway>/ado-mcp-proxy/<org>
 HTTP/1.1 302 Found
 Location: https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize?client_id=<public-client-id>&response_type=code
   &redirect_uri=http://127.0.0.1:33418/&scope=https://mcp.dev.azure.com/.default&code_challenge=…&code_challenge_method=S256
   &state=demo&resource=https://mcp.dev.azure.com
 ```
 
-Entra then serves the normal sign-in page, and the user's token works through the proxy
-exactly as in step 4. Reproduce all of this with `tools/mcp_probe.py` or the curl/PowerShell
+Entra then serves the normal sign-in page, and the user's token works through the working
+setup's MCP server exactly as in step 4. Reproduce all of this with `tools/mcp_probe.py` or the curl/PowerShell
 snippets in [docs/TESTING.md](docs/TESTING.md#2-curl--powershell-raw-protocol).
 
 ## Diagram 1: how an MCP client connects, and where native pass-through breaks
@@ -281,99 +292,156 @@ sequenceDiagram
     autonumber
     actor U as User
     participant C as MCP client
-    participant P as APIM /ado-mcp-proxy/{org}<br/>proxy-mcp.xml
-    participant A as APIM OAuth compatibility<br/>/.well-known, /register,<br/>/authorize, /token
+    participant P as APIM MCP server<br/>/ado-mcp-proxy/{org}<br/>proxy-mcp.xml
+    participant A as APIM PRM + OAuth APIs<br/>/ado-mcp-proxy/.well-known/...<br/>/ado-mcp-proxy/oauth/...<br/>+ .well-known aliases
     participant O as Azure DevOps MCP<br/>mcp.dev.azure.com/{org}
     participant E as Microsoft Entra ID
 
     C->>P: POST initialize (no token)
-    Note over P: org validated against the allow-list (else 404)
-    P->>O: forward to /{org} (HTTPS check, rate limit, X-MCP-Readonly, header hygiene)
-    O-->>P: 401 resource_metadata=mcp.dev.azure.com/...
-    Note over P: CHANGE 1 (outbound): replace WWW-Authenticate with<br/>resource_metadata={gateway}/.well-known/oauth-protected-resource/ado-mcp-proxy/{org}
-    P-->>C: 401 (APIM-hosted metadata)
-    C->>A: GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org}
-    Note over A: CHANGE 2 (oauth-prm.xml): APIM serves PRM per URL<br/>resource={gateway}/ado-mcp-proxy/{org}, authorization_servers=[{gateway}]
+    Note over P: proxy-mcp.xml inbound: HTTPS,<br/>org allow-list (else 404),<br/>rate limit, header hygiene
+    P-->>C: 401 resource_metadata={gateway}/ado-mcp-proxy/<br/>.well-known/oauth-protected-resource/{org}
+    Note over C,P: CHANGE 6: generated by APIM's MCP server<br/>(as on the regular setup).<br/>No policy rewrite, no scope parameter.
+    C->>A: GET /ado-mcp-proxy/.well-known/oauth-protected-resource/{org}
+    Note over A: CHANGE 1 (oauth-prm.xml, API ado-mcp-proxy-prm):<br/>the more specific API answers, not APIM's<br/>built-in metadata. resource={gateway}/ado-mcp-proxy/{org},<br/>authorization_servers=[{gateway}/ado-mcp-proxy/oauth]
     A-->>C: PRM (resource matches the URL the client used)
-    C->>A: GET /.well-known/oauth-authorization-server
-    Note over A: CHANGE 3 (oauth-as-metadata.xml): APIM is the authorization server<br/>(issuer={gateway}) with /authorize, /token and /register
+    C->>A: GET /.well-known/oauth-authorization-server/ado-mcp-proxy/oauth
+    Note over A: CHANGE 2 (oauth-as-metadata.xml):<br/>APIM is the authorization server<br/>(issuer={gateway}/ado-mcp-proxy/oauth)<br/>with authorize, token and register
     A-->>C: AS metadata
-    C->>A: POST /register (dynamic client registration)
-    Note over A: CHANGE 4 (oauth-register.xml): return the pre-registered<br/>Entra public client ID (Entra has no DCR endpoint)
+    C->>A: POST /ado-mcp-proxy/oauth/register (dynamic client registration)
+    Note over A: CHANGE 3 (oauth-register.xml):<br/>return the pre-registered Entra public<br/>client ID (Entra has no DCR endpoint)
     A-->>C: client_id
     C->>U: open browser
-    U->>A: GET /authorize?...&resource={gateway}/ado-mcp-proxy/{org}
-    Note over A: CHANGE 5 (oauth-authorize.xml): drop the client's resource,<br/>set resource=https://mcp.dev.azure.com, require PKCE S256
+    U->>A: GET /ado-mcp-proxy/oauth/authorize?...&resource={gateway}/ado-mcp-proxy/{org}
+    Note over A: CHANGE 4 (oauth-authorize.xml):<br/>drop the client's resource,<br/>set resource=https://mcp.dev.azure.com,<br/>add scope if missing, require PKCE S256
     A-->>U: 302 to login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize
     U->>E: sign in + consent
-    E-->>C: browser redirect with authorization code (127.0.0.1 / vscode.dev)
-    C->>A: POST /token (code, code_verifier, resource={gateway}/...)
-    Note over A: CHANGE 6 (oauth-token.xml): same resource rewrite, remove Origin,<br/>forward to Entra, tokens never logged
+    E-->>C: browser redirect with authorization code (127.0.0.1 / localhost / vscode.dev)
+    C->>A: POST /ado-mcp-proxy/oauth/token (code, code_verifier, resource={gateway}/...)
+    Note over A: CHANGE 5 (oauth-token.xml):<br/>same resource rewrite, remove Origin,<br/>forward to Entra, tokens never logged
     A->>E: POST /token (resource=https://mcp.dev.azure.com)
     E-->>A: access_token (aud = Azure DevOps MCP, the user) + refresh_token
     A-->>C: token response unchanged
     C->>P: POST initialize, tools/list, tools/call + Bearer
-    Note over P: CHANGE 7: forward the user's token unchanged to /{org},<br/>no response buffering (SSE), correlation ID, telemetry
+    Note over P: The MCP server forwards the user's<br/>token unchanged to /{org} and streams<br/>the SSE response. proxy-mcp.xml adds<br/>governance and telemetry only
     P->>O: same token
     O-->>C: results, Azure DevOps authorizes as the signed-in user
 ```
 
-Each change is explained for newcomers, per client and with before/after snippets, in
-[docs/CLIENTS-APIM-CHANGES.md](docs/CLIENTS-APIM-CHANGES.md) (which numbers the changes by what
-clients need), and element by element in [docs/POLICIES.md](docs/POLICIES.md).
+The change numbers are the same as in
+[docs/CLIENTS-APIM-CHANGES.md](docs/CLIENTS-APIM-CHANGES.md), which explains each change for
+newcomers, per client and with before/after snippets.
+[docs/POLICIES.md](docs/POLICIES.md) explains every policy element by element.
 
 | Step | What happens | Policy (in `infra/policies/`) |
 |---|---|---|
-| 1–3 | Unauthenticated `initialize` reaches the proxy. The organization in the path is validated; APIM forwards to `https://mcp.dev.azure.com/{org}`, which answers `401`. | `proxy-mcp.xml` inbound: HTTPS, org validation + allow-list, rate limit, `X-MCP-Readonly`, removal of spoofable headers |
-| 4 | **Change 1.** The origin's challenge is replaced with a pointer to APIM-hosted metadata for this exact URL. | `proxy-mcp.xml` outbound |
-| 5–6 | **Change 2.** APIM serves the PRM itself. `resource` equals the client URL, so VS Code accepts it, and the authorization server is APIM. | `oauth-prm.xml` |
-| 7–8 | **Change 3.** APIM publishes authorization-server metadata with its own issuer and endpoints. | `oauth-as-metadata.xml` |
-| 9–10 | **Change 4.** Dynamic client registration returns one pre-registered Entra public client, because Entra cannot register clients dynamically. | `oauth-register.xml` |
-| 11–13 | **Change 5.** `/authorize` keeps PKCE and the client's parameters, replaces `resource` with `https://mcp.dev.azure.com`, and redirects the browser to Entra. | `oauth-authorize.xml` |
-| 14–15 | The user signs in. Entra redirects the browser to the client's loopback/redirect URI with a code. APIM is not involved. | — |
-| 16–19 | **Change 6.** `/token` applies the same `resource` translation and forwards to Entra. Entra issues a delegated token for Azure DevOps MCP, returned unchanged. | `oauth-token.xml` |
-| 20–22 | **Change 7.** MCP traffic carries the user's own token. APIM forwards it unchanged, streaming without buffering. Azure DevOps authorizes and audits the real user. | `proxy-mcp.xml` backend/outbound |
+| 1–2 | Unauthenticated `initialize` reaches the working setup's MCP server. The policy checks HTTPS and the organization in the path (allow-list), and applies the rate limit. APIM answers `401` with `resource_metadata` pointing at `{gateway}/ado-mcp-proxy/.well-known/oauth-protected-resource/{org}`. **Change 6**: this challenge is built into the MCP server, exactly as on the regular setup. No policy rewrites it, and it carries no `scope` parameter. | `proxy-mcp.xml` inbound; the challenge itself: APIM, no policy |
+| 3–4 | **Change 1, the fix.** The URL from the challenge is answered by the plain API `ado-mcp-proxy-prm`, not by the MCP server's built-in metadata (API Management routes to the most specific API path). `resource` equals the client URL, so VS Code and Claude Code accept it, and the authorization server is the gateway, not Entra. | `oauth-prm.xml` |
+| 5–6 | **Change 2.** APIM publishes authorization-server metadata with its own issuer (`{gateway}/ado-mcp-proxy/oauth`) and endpoints under that path. All tested CLIs fetched it from the path-inserted alias. | `oauth-as-metadata.xml` |
+| 7–8 | **Change 3.** Dynamic client registration returns one pre-registered Entra public client, because Entra cannot register clients dynamically. | `oauth-register.xml` |
+| 9–11 | **Change 4.** `/authorize` keeps PKCE and the client's parameters, replaces `resource` with `https://mcp.dev.azure.com`, adds the scope if missing, and redirects the browser to Entra. | `oauth-authorize.xml` |
+| 12–13 | The user signs in. Entra redirects the browser to the client's loopback/redirect URI with a code. APIM is not involved. | — |
+| 14–17 | **Change 5.** `/token` applies the same `resource` translation and forwards to Entra. Entra issues a delegated token for Azure DevOps MCP, returned unchanged. | `oauth-token.xml` |
+| 18–20 | MCP traffic carries the user's own token. The MCP server forwards it unchanged and streams the response. Azure DevOps authorizes and audits the real user. | `proxy-mcp.xml` (governance and telemetry only) |
+
 ## APIs deployed in API Management
 
-`infra/main.bicep` creates three APIs (plus one backend, `ado-mcp-origin` →
-`https://mcp.dev.azure.com`). Every operation emits `<trace>` events to Application Insights
-(see [Observability](docs/OBSERVABILITY.md)).
+`infra/main.bicep` creates two **MCP servers** (APIM → *APIs → MCP servers*) and, for the
+working setup, five small **plain HTTP APIs** that exist only to make sign-in work. It also
+creates one backend, `ado-mcp-origin` → `https://mcp.dev.azure.com`, used by both MCP
+servers. Every API emits `<trace>` events to Application Insights (see
+[Observability](docs/OBSERVABILITY.md)).
 
-| API (path) | Type | Operation | Task | Policy |
-|---|---|---|---|---|
-| **`ado-mcp-native`** (`/ado-mcp-native`) | MCP (native pass-through) | *any* `/{org}` (POST/GET/DELETE) | **Regular setup.** APIM's built-in MCP pass-through to `https://mcp.dev.azure.com/{org}`. APIM rewrites the 401 challenge and proxies/rewrites the PRM (`/ado-mcp-native/.well-known/oauth-protected-resource/{org}`) by design. Adds `X-MCP-Readonly`. | `native-mcp.xml` |
-| **`ado-mcp-proxy`** (`/ado-mcp-proxy`) | HTTP | `POST /{org}` | **Working setup.** JSON-RPC requests (`initialize`, `notifications/initialized`, `tools/list`, `tools/call`). Validates the organization, **validates `tools/call` arguments of vetted tools** (see [Tool argument validation](docs/TOOL-VALIDATION.md)), applies governance, forwards the user's token unchanged, and streams the SSE response unbuffered. Declares an `application/json` request representation, which `validate-content` needs. | `proxy-mcp.xml` + fragment `tool-validation.xml` |
-| | | `GET /{org}`, `DELETE /{org}` | Optional MCP Streamable HTTP operations (server-initiated SSE stream, session end). Forwarded to the origin, which answers `405`. Codex sends a body-less `GET` before signing in, so these must never fail with `5xx`. | `proxy-mcp.xml` |
-| | | `POST /`, `GET /`, `DELETE /` | Same as above without an organization (bare endpoint; tools need `orgName`). | `proxy-mcp.xml` |
-| **`ado-mcp-oauth-compat`** (root `/`) | HTTP | `GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org}` (and without `/{org}`) | Protected-resource metadata (RFC 9728) for exactly the URL the client uses. `resource` = that URL, `authorization_servers` = the gateway, scope = Azure DevOps MCP. | `oauth-prm.xml` |
-| | | `GET /.well-known/oauth-authorization-server` | Authorization-server metadata (RFC 8414): issuer = gateway, endpoints `/authorize`, `/token`, `/register`, PKCE S256, public clients. | `oauth-as-metadata.xml` |
-| | | `GET /.well-known/openid-configuration` | Same document for clients that probe OpenID discovery. | `oauth-as-metadata.xml` |
-| | | `POST /register` | Dynamic client registration (RFC 7591) compatibility. Returns the pre-registered Entra public client ID, because Entra has no DCR endpoint. | `oauth-register.xml` |
-| | | `GET /authorize` | Requires PKCE S256, keeps the client's parameters, replaces `resource` with `https://mcp.dev.azure.com`, and redirects the browser (302) to Entra `/authorize`. | `oauth-authorize.xml` |
-| | | `POST /token` | Same `resource` translation, removes `Origin`, forwards the code/refresh-token exchange to Entra `/token`, and returns the token response unchanged. Nothing is logged. | `oauth-token.xml` |
-| `echo-api` | HTTP | — | APIM's built-in sample API on new instances. Not created or used by this lab. | — |
+**MCP servers** (type MCP, native pass-through, no operations):
 
-The `ado-mcp-oauth-compat` API also applies a CORS policy (any origin, `GET`/`POST`), so
-browser-based clients such as MCP Inspector can call discovery, `/register` and `/token`.
+| Name (path) | Task | Policy |
+|---|---|---|
+| **`ado-mcp-native`** (`/ado-mcp-native`) | **Regular setup.** Forwards `/{org}` to `https://mcp.dev.azure.com/{org}`. APIM rewrites the 401 challenge and proxies/rewrites the PRM (`/ado-mcp-native/.well-known/oauth-protected-resource/{org}`) by design, and that PRM names Entra: sign-in fails. | `native-mcp.xml` |
+| **`ado-mcp-proxy`** (`/ado-mcp-proxy`), display name *Azure DevOps MCP (working, ado-mcp-proxy)* | **Working setup.** The same feature and backend. Forwards the user's token unchanged and streams the response. The policy checks HTTPS and the organization (allow-list), sets the correlation ID, traces the MCP method and caller, applies the rate limit and the shared backend and response header fragments. No operations, no custom forwarding, no challenge rewrite, no tool argument validation ([why](docs/TOOL-VALIDATION.md)). | `proxy-mcp.xml` |
 
-Supporting resources: five **policy fragments** (APIM → *APIs → Policy fragments*), three
+**Plain HTTP APIs of the working setup** (all under its dedicated path, or path-scoped
+aliases; nothing at the gateway root):
+
+| API name (path) | Operations | Task | Policy |
+|---|---|---|---|
+| **`ado-mcp-proxy-prm`** (`/ado-mcp-proxy/.well-known/oauth-protected-resource`) | `GET /`, `GET /{org}` | Protected-resource metadata (RFC 9728) at exactly the URL the MCP server's 401 names. It takes precedence over the MCP server's built-in metadata (verified in the lab). `resource` = the client URL, `authorization_servers` = `{gateway}/ado-mcp-proxy/oauth`, scope = Azure DevOps MCP. | `oauth-prm.xml` |
+| **`ado-mcp-proxy-oauth`** (`/ado-mcp-proxy/oauth`) | `GET /.well-known/oauth-authorization-server`, `GET /.well-known/openid-configuration` | Authorization-server metadata (RFC 8414 / OpenID, path-appended to the issuer): issuer = `{gateway}/ado-mcp-proxy/oauth`, endpoints `…/authorize`, `…/token`, `…/register`, PKCE S256, public clients. | `oauth-as-metadata.xml` |
+| | `POST /register` | Dynamic client registration (RFC 7591) compatibility. Returns the pre-registered Entra public client ID, because Entra has no DCR endpoint. | `oauth-register.xml` |
+| | `GET /authorize` | Requires PKCE S256, keeps the client's parameters, replaces `resource` with `https://mcp.dev.azure.com`, adds the scope if missing, and redirects the browser (302) to Entra `/authorize`. | `oauth-authorize.xml` |
+| | `POST /token` | Same `resource` and scope handling, removes `Origin`, forwards the code/refresh-token exchange to Entra `/token`, and returns the token response unchanged. Nothing is logged. | `oauth-token.xml` |
+| **`ado-mcp-proxy-discovery-prm`** (`/.well-known/oauth-protected-resource/ado-mcp-proxy`) | `GET /`, `GET /{org}` | *Discovery alias* (`rootDiscoveryAliases`). The same PRM at the RFC 9728 path-inserted URL, for clients that ignore the 401 header (OpenAI Codex). | `oauth-prm.xml` |
+| **`ado-mcp-proxy-discovery-as`** (`/.well-known/oauth-authorization-server/ado-mcp-proxy`) | `GET /oauth` | *Discovery alias.* RFC 8414 path-inserted metadata for the issuer `{gateway}/ado-mcp-proxy/oauth`. | `oauth-as-metadata.xml` |
+| **`ado-mcp-proxy-discovery-oidc`** (`/.well-known/openid-configuration/ado-mcp-proxy`) | `GET /oauth` | *Discovery alias.* OpenID path-inserted metadata for the same issuer. | `oauth-as-metadata.xml` |
+
+`echo-api` (APIM's built-in sample API on new instances) is not created or used by this lab.
+The deployment output `proxyApiNames` lists the six working-setup names: the MCP server and
+the five plain APIs.
+
+The plain APIs apply a CORS policy (any origin, `GET`/`POST`), so browser-based clients such
+as MCP Inspector can call discovery, `register` and `token`.
+
+### Isolation: the working setup owns one dedicated path
+
+Everything the working setup needs lives under `{gateway}/ado-mcp-proxy` (parameter
+`proxyApiPath`). **Nothing is mounted at the gateway root**: no API with an empty path, and
+no `/authorize`, `/token`, `/register`, `/.well-known/oauth-authorization-server` or
+`/.well-known/openid-configuration` at the host root. Other APIs on the same API Management
+instance (including another product's OAuth endpoints) are therefore never shadowed, and the
+working setup is never borrowed by them.
+
+| Route | Purpose | Shared with other APIs? |
+|---|---|---|
+| `{gateway}/ado-mcp-proxy[/{org}]` | MCP endpoint (client URL), the MCP server | No |
+| `{gateway}/ado-mcp-proxy/.well-known/oauth-protected-resource[/{org}]` | PRM, the URL the MCP server's 401 names (API `ado-mcp-proxy-prm`) | No |
+| `{gateway}/ado-mcp-proxy/oauth/...` | OAuth metadata, `register`, `authorize`, `token` (API `ado-mcp-proxy-oauth`) | No |
+| `{gateway}/.well-known/oauth-protected-resource/ado-mcp-proxy[/{org}]` | Discovery alias (RFC 9728 path insertion) | No: matches only this setup's path suffix |
+| `{gateway}/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth` | Discovery alias (RFC 8414 path insertion) | No: same |
+| `{gateway}/.well-known/openid-configuration/ado-mcp-proxy/oauth` | Discovery alias (OpenID path insertion) | No: same |
+
+How it works and what to keep in mind:
+
+- API Management routes a request to the API with the **most specific matching path**
+  (verified in the lab): `/ado-mcp-proxy/oauth/token` goes to the OAuth API, not to the MCP
+  server; `/ado-mcp-proxy/.well-known/oauth-protected-resource/{org}` goes to the PRM API,
+  not to the MCP server's built-in metadata; and a
+  `/.well-known/oauth-protected-resource/ado-mcp-proxy` API coexists with any other API
+  under `/.well-known`.
+- The aliases are standard RFC locations that *include* the setup's path, so they can only
+  answer for this setup. **Keep them on** (`rootDiscoveryAliases = true`, the default). All
+  three CLIs fetched the authorization-server metadata from the path-inserted alias. With the
+  aliases removed, OpenAI Codex and Claude Code failed in the lab: they do not try the
+  OpenID path-appended URL and fall back to `/register` at the gateway root (`404`). Turn
+  them off only for clients you have verified without them.
+- An organization literally named `oauth` cannot use the path form
+  (`/ado-mcp-proxy/oauth`); use the bare endpoint with `orgName` for it.
+- Several working setups can share one instance: deploy again with another `proxyApiPath`
+  (API names and display names include the path).
+- `tools/mcp_probe.py` checks it on every run: step *client: OAuth endpoints under the MCP
+  path (isolation)* fails if any gateway-hosted OAuth endpoint is outside the MCP URL's path.
+- **Upgrading from an earlier version** of this lab (OAuth API at the gateway root, or the
+  working setup as a plain HTTP API proxy): Bicep deploys incrementally and does not delete
+  old APIs, and an API's type cannot change from HTTP to MCP. Delete the old APIs, then make
+  clients forget the old issuer (Claude Code cached it and went to the removed root
+  `/authorize`): see
+  [GETTING-STARTED.md](docs/GETTING-STARTED.md#upgrading-from-an-earlier-version).
+
+Supporting resources: four **policy fragments** (APIM → *APIs → Policy fragments*) and three
 **named values** (`mcp-allowed-organizations`, `mcp-readonly`, `mcp-toolsets`; APIM →
-*Named values*, editable without redeploying), and one **schema** resource per vetted tool,
-`mcp-tool-core-list-projects` and `mcp-tool-wit-work-item` (APIM → *APIs → Schemas*).
+*Named values*, editable without redeploying).
 
 How the policies are composed from fragments (details and diagram:
 [docs/POLICIES.md](docs/POLICIES.md#how-the-policies-are-composed-fragments)):
 
 | Fragment | What it does | `native-mcp` | `proxy-mcp` | `oauth-prm` | `oauth-token` |
 |---|---|---|---|---|---|
-| `mcp-org-validation` | `{org}` from the URL; 404 for malformed or not allowed organizations | | ✅ | ✅ | |
+| `mcp-org-validation` | Organization from the URL (`{org}` on the PRM operations, the path after the API path on the MCP server); 404 for malformed or not allowed organizations | | ✅ | ✅ | |
 | `mcp-caller-identity` | User `oid` and client app ID from the token, for telemetry only | ✅ | ✅ | | |
-| `mcp-tool-validation` | `tools/call` argument validation | ❌ not possible | ✅ | | |
 | `mcp-backend-headers` | Strip spoofable headers; `X-MCP-Readonly` / `X-MCP-Toolsets` | ✅ | ✅ | | |
 | `mcp-response-headers` | `Cache-Control: no-store`, `x-apim-request-id` | ✅ | ✅ | | ✅ |
 
-Both MCP APIs share the same governance fragments, so the regular and the working setup
-differ only in OAuth discovery.
+Both MCP servers share the read-only, toolsets, header-hygiene, caller-identity and
+response-header fragments. The working setup additionally enforces HTTPS, the organization
+allow-list, a per-IP rate limit and an `X-Correlation-ID`; the regular setup stays minimal
+because it is the reproduction. For sign-in, the only thing that matters is OAuth discovery.
 
 ## What is in this repository
 
@@ -385,12 +453,10 @@ infra/
   modules/monitoring.bicep         Log Analytics + workspace-based Application Insights
   modules/apim-observability.bicep APIM loggers, diagnostics, diagnostic settings
   modules/mcp-native.bicep         regular setup: native MCP pass-through
-  modules/mcp-proxy.bicep          working setup: HTTP proxy + OAuth compatibility
-  modules/mcp-tool-validation.bicep  tool-argument validation: schema resources + policy fragment
+  modules/mcp-proxy.bicep          working setup: MCP server + PRM/OAuth compatibility APIs, all under its dedicated path
   modules/policy-fragments.bicep   shared policy fragments + named values (allow-list, read-only, toolsets)
   policies/                        APIM policy XML per API/operation (see diagram 2)
   policies/fragments/              reusable policy fragments included by those policies
-  schemas/tools/                   curated argument schemas per vetted MCP tool
 scripts/setup-entra.ps1            Entra prerequisites (service principal, public client, client redirect URIs)
 tools/mcp_probe.py                 end-to-end probe (origin vs gateway), stdlib only
 tools/query_logs.py                run docs/kql/*.kql from the command line
@@ -398,11 +464,11 @@ tools/probe.example.json           copy to probe.local.json (gitignored)
 tools/tests/                       unit and loopback tests for the probe
 docs/GETTING-STARTED.md            deploy step by step, with expected output
 http/                              step-by-step .http walkthroughs (REST Client, httpYac, JetBrains)
-docs/TESTING.md                    probe, raw protocol, logs, validation tests
+docs/TESTING.md                    probe, raw protocol, logs, client checklist
 docs/clients/                      one guide per MCP client (VS Code, Copilot CLI, Codex, Claude Code, Inspector)
 docs/CLIENTS-APIM-CHANGES.md       what APIM changes for each client, and why
 docs/POLICIES.md                   every APIM policy, element by element
-docs/TOOL-VALIDATION.md            tool-argument validation design and limits
+docs/TOOL-VALIDATION.md            tool argument validation: optional, not deployed; how to add it
 docs/OBSERVABILITY.md              where calls and policy events land; KQL guide
 docs/GLOSSARY.md                   PRM, DCR, PKCE, resource indicator, AADSTS codes, APIM terms
 docs/ANALYSIS.md                   root cause, reference implementation, options, sources
@@ -425,21 +491,26 @@ remains the working option. Details: [docs/AI-GATEWAY.md](docs/AI-GATEWAY.md).
 ## Client compatibility
 
 Tested in the lab with real clients (Copilot CLI 1.0.113, Codex CLI 0.167.0, Claude Code
-2.1.322 on 2026-11-18; VS Code and MCP Inspector on 2026-11-17). Details, commands and log
-evidence are in [docs/clients](docs/clients/README.md). What APIM changes for each client, and
-why, is in [docs/CLIENTS-APIM-CHANGES.md](docs/CLIENTS-APIM-CHANGES.md).
+2.1.322 on 2026-11-18; VS Code and MCP Inspector on 2026-11-17). On the current layout (the
+working setup as an APIM MCP server, everything under `/ado-mcp-proxy`), these were verified
+again on 2026-11-18: Copilot CLI 1.0.114 signed in and called `core_list_projects`; Codex CLI
+0.167.0 signed in; Claude Code 2.1.322 connected. VS Code and MCP Inspector were not re-run
+on this layout. Details, commands and log evidence are in
+[docs/clients](docs/clients/README.md). What APIM changes for each client, and why, is in
+[docs/CLIENTS-APIM-CHANGES.md](docs/CLIENTS-APIM-CHANGES.md).
 
 | Client | Working setup (`/ado-mcp-proxy/<org>`) | Regular setup (`/ado-mcp-native/<org>`) |
 |---|---|---|
-| VS Code (GitHub Copilot) | ✅ sign-in and tools | ❌ `AADSTS9010010` |
-| GitHub Copilot CLI | ✅ sign-in, tools, validation error surfaced | ⚠️ connects in interactive mode through Copilot CLI's own Entra broker (client feature, not the gateway); `-p` reports *requires authentication* |
-| OpenAI Codex CLI | ✅ sign-in, tools, validation error surfaced | ⚠️ connects only because it falls back to the working setup's OAuth endpoints on the same host (lab side effect) |
+| VS Code (GitHub Copilot) | ✅ sign-in and tools (not re-run on the current layout) | ❌ `AADSTS9010010` |
+| GitHub Copilot CLI | ✅ sign-in, tools | ⚠️ connects in interactive mode through Copilot CLI's own Entra broker (client feature, not the gateway); `-p` reports *requires authentication* |
+| OpenAI Codex CLI | ✅ sign-in, tools | ❌ *Dynamic registration failed: HTTP 404*: no metadata, falls back to `/register` at the gateway root, which no longer exists |
 | Claude Code | ✅ sign-in, connected, `tools/list` | ❌ *does not support dynamic client registration*; with `--client-id` ❌ `AADSTS9010010` |
-| MCP Inspector | ✅ | ❌ no DCR, or `AADSTS9010010` with a client ID |
+| MCP Inspector | ✅ (not re-run on the current layout) | ❌ no DCR, or `AADSTS9010010` with a client ID |
 
-The regular-setup failures are the reported problem. The two ⚠️ results do not mean native
-pass-through is fixed: one comes from a client-specific Entra integration, the other from the
-lab hosting both setups on one gateway.
+The regular-setup failures are the reported problem. The ⚠️ result does not mean native
+pass-through is fixed: it comes from a client-specific Entra integration. (Before the working
+setup moved to its own path, Codex also "connected" to the native URL by borrowing the
+working setup's root endpoints. The isolation removed that side effect.)
 
 ## Get started
 
@@ -458,18 +529,19 @@ python tools/mcp_probe.py --config tools/probe.local.json --token az
 
 ## Tool argument validation
 
-On the working setup, the gateway checks the arguments of vetted tools (`core_list_projects`,
-`wit_work_item`) against curated JSON schemas before the call reaches Azure DevOps. It answers
-invalid calls itself with JSON-RPC `-32602` (or `isError` for MCP `2025-11-25`), naming only
-the field and the rule. The hosted server, by contrast, accepts `top: "5"`, `top: 500` and
-unknown arguments. All three CLIs showed the gateway's message to the agent. Design, error
-format, limits and how to add a tool: [docs/TOOL-VALIDATION.md](docs/TOOL-VALIDATION.md).
+Not deployed. Neither setup checks `tools/call` arguments at the gateway; the hosted server
+decides, and it accepts `top: "5"`, `top: 500` and unknown arguments. An earlier version of
+the lab validated two tools against curated JSON schemas with APIM's `validate-content`. That
+policy needs API operations, and MCP servers have none (it made every request fail with
+HTTP 500), so it was removed when the working setup became an MCP server. How to add
+validation if you need it (an HTTP API in front, policy expressions, or tool allow-lists):
+[docs/TOOL-VALIDATION.md](docs/TOOL-VALIDATION.md).
 
 ## Observability
 
 Every gateway call is a **request** in Application Insights, the outbound call a
 **dependency**, and every policy decision a **trace** (`<trace>` policies: MCP method,
-organization, user `oid`, client app, OAuth step, redirect URI, validation result).
+organization, user `oid`, client app, OAuth step, redirect URI).
 Resource logs go to Log Analytics (`ApiManagementGatewayLogs`, `ApiManagementGatewayMCPLog`).
 No tokens, `Authorization` headers or response bodies are logged. Ready-made KQL is in
 `docs/kql/`. Table guide, queries and examples: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
@@ -486,8 +558,14 @@ No tokens, `Authorization` headers or response bodies are logged. Ready-made KQL
 - `/register` hands every client the same public client ID. Consent and the redirect-URI
   allow-list therefore belong to that one app registration. Keep its redirect URIs minimal.
 - PKCE S256 is enforced at `/authorize`. Entra still validates client, redirect URI and consent.
-- The facade depends on behaviour that APIM does not document (root-path API, discovery
-  paths). Re-run the probe after APIM or client updates.
+- The facade relies on API Management routing to the most specific API path: the PRM and
+  OAuth APIs are nested under the MCP server's path, where they take precedence over its
+  built-in metadata, and the discovery aliases live under `/.well-known`. If APIM changed
+  that, the MCP server's built-in PRM (which names Entra) would answer again and sign-in
+  would fail as on the regular setup. Re-run the probe, including its isolation check, after
+  APIM or client updates.
+- No tool arguments are validated at the gateway ([TOOL-VALIDATION.md](docs/TOOL-VALIDATION.md)).
+  Use `readOnly` and `toolsets` to limit which tools exist.
 
 ## Cost
 
@@ -501,16 +579,17 @@ Delete the lab resource group when finished.
 ## Credits
 
 - **[carolga/ado-apim](https://github.com/carolga/ado-apim)**: the original APIM proxy for
-  the hosted Azure DevOps MCP server. The working setup reuses its design: the HTTP proxy
-  instead of native MCP, the governance policy (HTTPS, rate limit, `X-MCP-Readonly`/
-  `X-MCP-Toolsets`, header hygiene, correlation ID, unbuffered forwarding), and the OAuth
-  compatibility endpoints (PRM, authorization-server metadata, static `/register`,
-  `/authorize` and `/token` adding the Azure DevOps `resource`). It also reuses the Entra
-  prerequisites (*Azure DevOps MCP* service principal, public client with VS Code redirect
-  URIs). This repository adds:
-  - PRM `resource` equal to the client URL;
+  the hosted Azure DevOps MCP server. The working setup keeps its OAuth compatibility idea:
+  APIM-hosted PRM and authorization-server metadata, a static `/register`, and `/authorize`
+  and `/token` adding the Azure DevOps `resource`. It also reuses the governance policy
+  (HTTPS, rate limit, `X-MCP-Readonly`/`X-MCP-Toolsets`, header hygiene, correlation ID) and
+  the Entra prerequisites (*Azure DevOps MCP* service principal, public client with VS Code
+  redirect URIs). Its HTTP API proxy is no longer used: the working setup now uses APIM's
+  native MCP server, like the regular setup. This repository adds:
+  - PRM `resource` equal to the client URL, served at the URL the MCP server advertises;
   - `resource` replacement rather than addition;
   - organization-in-path multi-organization support;
+  - isolation of every route under one dedicated path;
   - Log Analytics resource logs and KQL;
   - the end-to-end probe;
   - the native pass-through comparison and its root-cause analysis.

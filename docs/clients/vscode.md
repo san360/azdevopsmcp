@@ -1,13 +1,14 @@
 # VS Code (GitHub Copilot agent mode)
 
 VS Code is the reference client: the reproduction of the reported problem and the first working-setup
-validation used it (lab, 2026-11-17).
+validation used it (lab, 2026-11-17). It was not re-run after the working setup became an APIM
+MCP server (2026-11-18); the PRM it reads is the same document.
 
 ## How it signs in
 
 | Step | Behaviour |
 |---|---|
-| Discovery | `POST initialize` → `resource_metadata` from the `401` → PRM. VS Code **rejects a PRM whose `resource` differs from the server URL** (RFC 9728 §3.3) |
+| Discovery | `POST initialize` → `resource_metadata` from the `401` (`/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>` on the working setup) → PRM. VS Code **rejects a PRM whose `resource` differs from the server URL** (RFC 9728 §3.3) |
 | Client ID | Dynamic client registration when offered; otherwise asks for a client ID |
 | Redirect URI | `http://127.0.0.1:33418/` (desktop) or `https://vscode.dev/redirect` |
 | `resource` | Sends the PRM `resource` ([microsoft/vscode#314784](https://github.com/microsoft/vscode/pull/314784)); APIM replaces it on the proxy |

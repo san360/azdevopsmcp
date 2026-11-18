@@ -1,6 +1,8 @@
 // Shows the OAuth challenge the origin sent next to the one APIM returned to the client.
-// Native MCP pass-through rewrites resource_metadata to the gateway; the HTTP proxy policy
-// replaces it with APIM-hosted metadata.
+// Both setups are APIM MCP servers, so APIM rewrites resource_metadata to
+// {gateway}/{api}/.well-known/oauth-protected-resource/{org} for both. The difference is who
+// answers that URL: APIM's built-in metadata (native, names Entra) or the working setup's
+// PRM API (names the gateway's OAuth facade).
 ApiManagementGatewayLogs
 | where TimeGenerated > ago(1d)
 | where ResponseCode == 401

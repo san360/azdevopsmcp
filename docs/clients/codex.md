@@ -1,12 +1,15 @@
 # OpenAI Codex CLI
 
-Tested with Codex CLI 0.167.0 on Windows (lab, 2026-11-18).
+Tested with Codex CLI 0.167.0 on Windows (lab, 2026-11-18). Sign-in re-verified on the
+current layout of the working setup (an APIM MCP server, everything under `/ado-mcp-proxy`):
+`Auth: OAuth`, and fresh discovery reaches `https://<gateway>/ado-mcp-proxy/oauth/authorize`.
+Tool calls were verified on the earlier HTTP-proxy layout.
 
 ## How it signs in (observed)
 
 | Step | Behaviour |
 |---|---|
-| Discovery | Body-less `GET` of the MCP URL first (expects `401` or `405`), then the path-inserted PRM `/.well-known/oauth-protected-resource/<path>`, then authorization-server metadata (path-inserted variants, then the host root) |
+| Discovery | Body-less `GET` of the MCP URL first (expects `401` or `405`), then the path-inserted PRM `/.well-known/oauth-protected-resource/<path>` (served by the gateway's discovery alias), then authorization-server metadata at the path-inserted `/.well-known/oauth-authorization-server/<issuer path>` (observed: `/ado-mcp-proxy/oauth`), falling back to the host root |
 | Client ID | Dynamic client registration, `client_name` `Codex` (or `--oauth-client-id`) |
 | Redirect URI | `http://127.0.0.1:<random port>/callback/<id>`. The `<id>` is fixed per MCP URL: base64url of the first 9 bytes of the URL's SHA-256 |
 | `resource` | Sends the PRM `resource` (gateway URL); APIM replaces it |
@@ -42,33 +45,33 @@ Add your model provider settings to the same file as usual (Codex needs a model 
 ## Sign in
 
 ```powershell
-codex mcp login ado_proxy     # browser opens via the gateway's /authorize
+codex mcp login ado_proxy     # browser opens via the gateway's /ado-mcp-proxy/oauth/authorize
 # Successfully logged in to MCP server 'ado_proxy'.
 codex mcp list                # Auth: OAuth
 ```
 
-Regular setup: `codex mcp login ado_native` **also succeeds in the lab**. Codex finds no PRM
-at the standard addresses for the native URL and falls back to the authorization server at
-the host root. That is the working setup's endpoint on the same APIM instance. A gateway
-without the working setup gives Codex no metadata, so it cannot sign in (*unverified*).
+To sign in with a specific browser profile, use `--no-browser`, run it in a real terminal
+(it waits for input), and open the printed URL yourself, for example
+`msedge.exe --profile-directory="<profile>" "<url>"`. The printed URL must start with
+`https://<gateway>/ado-mcp-proxy/oauth/authorize`; the callback completes on its own.
+
+Regular setup: `codex mcp login ado_native` **fails** with *Dynamic registration failed:
+HTTP 404*. Codex finds no PRM at the standard addresses for the native URL, falls back to
+default endpoints at the host root, and the gateway has none (observed 2026-11-18). Before
+the working setup moved under its own path, this fallback borrowed the working setup's root
+endpoints and the login "succeeded"; the isolation removed that side effect.
 Details:
 [the regular setup with these clients](../CLIENTS-APIM-CHANGES.md#the-regular-setup-with-these-clients-what-you-will-see).
 
 ## Test headless
 
 ```powershell
-codex exec --skip-git-repo-check "Use only the ado_proxy MCP server tools (no shell). Call core_list_projects with no arguments and print the project names. Then call core_list_projects with top set to 500 and print the exact error."
+codex exec --skip-git-repo-check "Use only the ado_proxy MCP server tools (no shell). Call core_list_projects with no arguments and print the project names."
 ```
 
-Expected (lab):
-
-```text
-Step 1: <project>
-Step 2: tool call error: tool call failed for `ado_proxy/core_list_projects`
-Caused by:
-    Mcp error: -32602: Invalid arguments for tool core_list_projects: top violates maximum. Rejected by the API gateway
-    before reaching the server.({"tool":"core_list_projects","violations":[{"field":"top","rule":"maximum"}],"source":"api-gateway"})
-```
+Expected: the project names, for example `<project>`. The gateway does not validate tool
+arguments any more, so the *-32602 ... Rejected by the API gateway* error of earlier versions
+is no longer expected ([TOOL-VALIDATION.md](../TOOL-VALIDATION.md)).
 
 Small models may answer without calling the tool. A stronger model followed the prompt
 reliably in the lab.
@@ -84,9 +87,12 @@ public client as `clientAppId`.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `OAuth metadata discovery failed ... unexpected HTTP status 500` | The gateway failed on the body-less `GET` probe (fixed: [change 7](../CLIENTS-APIM-CHANGES.md#change-7-body-less-get-and-delete-must-not-crash-the-gateway)) | Redeploy the current policies |
+| `OAuth metadata discovery failed ... unexpected HTTP status 500` | The gateway failed on the body-less `GET` probe (seen with an earlier HTTP-proxy version; the MCP server answers `405`: [change 7](../CLIENTS-APIM-CHANGES.md#change-7-body-less-get-and-delete-must-not-fail-built-in)) | Deploy the current version |
 | `AADSTS50011` after sign-in | `http://127.0.0.1/callback/<id>` for this exact URL is not registered | `setup-entra.ps1 -McpUrl <url>` |
 | `Missing environment variable` for the model | Model provider configuration, not MCP | Set the provider's key or token |
+| *Dynamic registration failed: HTTP 404* on the proxy URL | The gateway's discovery aliases are missing, so Codex falls back to the host root (observed with the aliases removed) | Redeploy with `rootDiscoveryAliases = true` |
+| `--no-browser`: *No OAuth callback URL received before input closed* | Run without a terminal (stdin closed) | Run it in a real terminal window |
+| Browser goes to `https://<gateway>/authorize` (`404`) after a gateway change | Cached authorization server from an older lab version | `codex mcp logout <name>`, then log in again |
 
 References: [Codex MCP documentation](https://developers.openai.com/codex/mcp),
 [openai/codex](https://github.com/openai/codex).

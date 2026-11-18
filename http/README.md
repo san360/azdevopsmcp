@@ -8,8 +8,7 @@ and **where** to find it in the logs.
 | File | Shows |
 |---|---|
 | [`01-not-working-native.http`](01-not-working-native.http) | Native APIM MCP pass-through. Sign-in ends at step 5 with `AADSTS9010010`; the MCP calls work with a token from elsewhere |
-| [`02-working-proxy.http`](02-working-proxy.http) | The working setup, from the anonymous call to a successful `tools/call`, including the gateway's `/register`, `/authorize` and `/token` |
-| [`03-tool-validation.http`](03-tool-validation.http) | A valid call, then calls the gateway rejects with JSON-RPC `-32602` |
+| [`02-working-proxy.http`](02-working-proxy.http) | The working setup, from the anonymous call to a successful `tools/call`, including the gateway's PRM under `/ado-mcp-proxy/.well-known/...` and its `register`, `authorize` and `token` under `/ado-mcp-proxy/oauth` |
 | [`04-ai-gateway.http`](04-ai-gateway.http) | Azure AI Gateway: no discovery, a gateway token, and the on-behalf-of exchange ([AI-GATEWAY.md](../docs/AI-GATEWAY.md)) |
 
 ## Native vs. working, step by step
@@ -18,14 +17,14 @@ The step numbers are the same in files 01 and 02, so you can see exactly where t
 
 | Step | Native pass-through (01) | Working setup (02) |
 |---|---|---|
-| 1 Anonymous `initialize` | `401`, `resource_metadata` **rewritten by APIM** to `/ado-mcp-native/.well-known/...` | `401`, `resource_metadata` points at **APIM-hosted** PRM, plus `scope=` |
-| 2 PRM | `resource` = gateway URL, `authorization_servers` = **Entra**, scope = Azure DevOps | `resource` = gateway URL, `authorization_servers` = **the gateway** |
-| 3 Authorization-server metadata | Entra's OpenID configuration, **no** `registration_endpoint` | APIM's metadata: `/authorize`, `/token`, `/register` |
-| 4 Client registration | Nothing to call (Entra has no DCR); needs a pre-set client ID | `POST /register` → `201` with the pre-registered public client |
+| 1 Anonymous `initialize` | `401`, `resource_metadata` **rewritten by APIM** to `/ado-mcp-native/.well-known/...` | `401`, the same built-in APIM behaviour: `resource_metadata` points at `/ado-mcp-proxy/.well-known/...`, no `scope` |
+| 2 PRM | APIM's built-in metadata: `resource` = gateway URL, `authorization_servers` = **Entra**, scope = Azure DevOps | The API `ado-mcp-proxy-prm` answers instead: `resource` = gateway URL, `authorization_servers` = **the gateway** (`/ado-mcp-proxy/oauth`) |
+| 3 Authorization-server metadata | Entra's OpenID configuration, **no** `registration_endpoint` | APIM's metadata: issuer `/ado-mcp-proxy/oauth` with its `authorize`, `token`, `register` |
+| 4 Client registration | Nothing to call (Entra has no DCR); needs a pre-set client ID | `POST /ado-mcp-proxy/oauth/register` → `201` with the pre-registered public client |
 | 5 Authorize | Entra answers `302` → `error=invalid_target`, **`AADSTS9010010`** | APIM answers `302` to Entra with `resource=https://mcp.dev.azure.com` → sign-in page |
-| 6 Token | Not reachable | `POST /token` (APIM translates `resource`) → user token for Azure DevOps MCP |
+| 6 Token | Not reachable | `POST /ado-mcp-proxy/oauth/token` (APIM translates `resource`) → user token for Azure DevOps MCP |
 | 7–10 `initialize`, `notifications/initialized`, `tools/list`, `tools/call` | Work with a token obtained outside MCP | Work with the token from step 6 (or the same shortcut token) |
-| 11 Invalid `tools/call` (`top: 500`) | Accepted by the server | Rejected by the gateway: `-32602`, `x-mcp-gateway-validation: rejected` |
+| 11 Out-of-range `tools/call` (`top: 500`) | Accepted by the server | Accepted by the server too: no gateway validation ([TOOL-VALIDATION.md](../docs/TOOL-VALIDATION.md)) |
 
 ## Set up
 
@@ -55,12 +54,17 @@ The step numbers are the same in files 01 and 02, so you can see exactly where t
 4. Run the requests in order (**Send Request** above each one). Later steps read values
    from earlier responses, so run steps 2 to 5 of file 02 before step 6.
 
-With the httpyac CLI:
+With the httpyac CLI, convert the chaining syntax first (a temporary copy; do not commit it):
 
 ```powershell
 cd http
-npx httpyac send 01-not-working-native.http --all --env lab -o short
+(Get-Content 02-working-proxy.http -Raw).Replace('.response.body.$.', '.') | Set-Content -Encoding utf8NoBOM 02.httpyac.tmp.http
+npx httpyac send 02.httpyac.tmp.http --all --env lab --var "token=$(az account get-access-token --scope https://mcp.dev.azure.com/.default --query accessToken -o tsv)" -o short
+Remove-Item 02.httpyac.tmp.http
 ```
+
+Without the conversion, httpyac stops at step 3 with *Cannot read properties of undefined
+(reading 'body')*.
 
 ## The manual steps (file 02, steps 5 and 6)
 
@@ -86,17 +90,19 @@ create a new random verifier for every sign-in (RFC 7636).
 - **SSE:** the Azure DevOps server answers MCP requests with `Content-Type:
   text/event-stream`. The tools show the raw text, for example
   `event: message` / `data: {"result":...}`. The JSON-RPC response is the `data:` line.
-- **Gateway answers** (rejections, `401`, `404`) are plain `application/json`.
+- **Gateway answers** (for example `404 {"error":"unknown_organization"}`) are plain
+  `application/json`. The `401` has no body.
 - **Request IDs:** every gateway response has `x-apim-request-id`. Find it with
   `python tools/query_logs.py docs/kql/gateway-by-request-id.kql -g <rg> -w log-<apim-name> --param x-apim-request-id=<id>`,
-  and see the policy steps with `policy-traces.kql`, sign-in steps with `client-signins.kql`,
-  validation decisions with `tool-validation.kql`.
+  and see the policy steps with `policy-traces.kql` and sign-in steps with `client-signins.kql`.
 - **Cookies:** the Azure DevOps origin sets a cookie for its own backend host, and the
   gateway passes `Set-Cookie` through. Strict clients (httpyac) reject a cookie for a
   different domain, so `.httpyac.json` disables the cookie jar. MCP does not use cookies.
 
 ## Validated
 
-All four files were run against the lab on 2026-11-18 with the httpyac CLI. Steps 1–11
-behave as documented on both setups. Step 6 of file 02 needs a real code (manual); with the
-placeholder it returns `400 invalid_grant` (`AADSTS9002313`) as documented.
+Files 01 and 04 were run against the lab on 2026-11-18 with the httpyac CLI. File 02 was
+re-run on the current layout (working setup as an APIM MCP server, OAuth under
+`/ado-mcp-proxy/oauth`) on 2026-11-18 with the conversion above: all 11 requests answered as
+documented (`401`, `200`, `200`, `201`, `302`, step 6 `400 invalid_grant` with the
+placeholder code, then `200`, `202`, `200`, `200`, `200`).

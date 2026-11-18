@@ -4,7 +4,8 @@
             Microsoft Entra v2 token endpoint with "resource" set to the Azure
             DevOps MCP identifier and the Azure DevOps MCP scope added when
             missing. Returns Entra's answer unchanged.
-  RUNS ON : API "ado-mcp-oauth-compat", operation POST /token. Called by the MCP
+  RUNS ON : API "ado-mcp-proxy-oauth" (path ado-mcp-proxy/oauth), operation
+            POST /token. Called by the MCP
             client after the browser redirect (authorization_code) and later to
             refresh (refresh_token).
   INPUT   : application/x-www-form-urlencoded: grant_type, code + code_verifier +

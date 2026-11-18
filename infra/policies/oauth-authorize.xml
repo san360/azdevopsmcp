@@ -4,7 +4,8 @@
             Microsoft Entra v2 authorize endpoint with the client's parameters,
             except that the RFC 8707 "resource" becomes the Azure DevOps MCP
             identifier and a scope is added when missing.
-  RUNS ON : API "ado-mcp-oauth-compat", operation GET /authorize, opened in the
+  RUNS ON : API "ado-mcp-proxy-oauth" (path ado-mcp-proxy/oauth), operation
+            GET /authorize, opened in the
             user's browser by the MCP client after registration.
   INPUT   : Query string with client_id, response_type=code, redirect_uri, state,
             code_challenge, code_challenge_method=S256, usually scope and

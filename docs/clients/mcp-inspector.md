@@ -2,8 +2,9 @@
 
 [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the protocol-level
 test client. It runs in the browser, so it also needs CORS on the gateway's OAuth endpoints
-(the `ado-mcp-oauth-compat` API allows any origin) and the `Origin` header removed on
-`/token` (`oauth-token.xml`).
+(the `ado-mcp-proxy-prm` and `ado-mcp-proxy-oauth` APIs and the discovery aliases allow any
+origin) and the `Origin` header removed on `/token` (`oauth-token.xml`). Tested in the lab on
+2026-11-17; not re-run after the working setup became an APIM MCP server.
 
 ```powershell
 npx @modelcontextprotocol/inspector     # npm 12 may need: $env:npm_config_allow_remote='all'

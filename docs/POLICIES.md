@@ -10,7 +10,8 @@ readers who are new to APIM, OAuth or MCP. Each step says **what** the policy do
 - [GETTING-STARTED.md](GETTING-STARTED.md) deploys the lab step by step.
 - [TESTING.md](TESTING.md) has the end-to-end probe and more test commands.
 - [OBSERVABILITY.md](OBSERVABILITY.md) explains the log tables and where each call appears.
-- [TOOL-VALIDATION.md](TOOL-VALIDATION.md) has the design of tool argument validation.
+- [TOOL-VALIDATION.md](TOOL-VALIDATION.md) explains why no tool arguments are validated, and
+  how to add validation if you need it.
 - [GLOSSARY.md](GLOSSARY.md) explains the terms (PRM, DCR, PKCE, resource indicator, SSE,
   JSON-RPC, public client, APIM terms and others).
 - [CLIENTS-APIM-CHANGES.md](CLIENTS-APIM-CHANGES.md) lists what each MCP client (VS Code,
@@ -20,7 +21,7 @@ readers who are new to APIM, OAuth or MCP. Each step says **what** the policy do
 Every policy file starts with the same comment block (`PURPOSE`, `RUNS ON`, `INPUT`,
 `OUTPUT`, `WHY`, `VERIFY`, `FILLED`, `DETAILS`), and short inline comments explain the
 non-obvious elements. This document is the long version of those comments. API Management
-drops most XML comments when it stores a policy (the lab's proxy policy kept 2 of them), so
+drops most XML comments when it stores a policy (an earlier version of the lab's proxy policy kept 2 of them), so
 read the source files in `infra/policies/`, not the portal's policy editor.
 
 Placeholders used in the samples: `<gateway>` (APIM host name), `<org>` (Azure DevOps
@@ -36,7 +37,6 @@ client), `<rg>` and `<workspace>` (resource group and Log Analytics workspace).
   - [1. native-mcp.xml](#1-native-mcpxml-native-mcp-pass-through)
 - Working setup
   - [2. proxy-mcp.xml](#2-proxy-mcpxml-the-mcp-data-plane)
-  - [2a. tool-validation.xml](#2a-tool-validationxml-tool-argument-validation-fragment)
   - [3. oauth-prm.xml](#3-oauth-prmxml-protected-resource-metadata)
   - [4. oauth-as-metadata.xml](#4-oauth-as-metadataxml-authorization-server-metadata)
   - [5. oauth-register.xml](#5-oauth-registerxml-dynamic-client-registration-compatibility)
@@ -56,16 +56,17 @@ Reference: [API Management policies](https://learn.microsoft.com/azure/api-manag
 | Section | Runs | Typical use here |
 |---|---|---|
 | `<inbound>` | When the client's request arrives, before anything is sent to a backend | Validate the organization, rewrite OAuth parameters, answer metadata requests directly |
-| `<backend>` | When the request is sent to the backend (`<forward-request>`) | Stream the MCP response without buffering; set timeouts |
-| `<outbound>` | When the backend's response comes back, before it goes to the client | Replace the `WWW-Authenticate` challenge, add headers, write telemetry |
+| `<backend>` | When the request is sent to the backend (`<forward-request>`) | `<base />` (the MCP servers forward to their backend); the token endpoint sets a timeout |
+| `<outbound>` | When the backend's response comes back, before it goes to the client | Add headers, write telemetry |
 | `<on-error>` | When any policy or the backend call fails | Write an error trace, keep correlation headers |
 
 **Scopes and `<base />`.** Policies exist at several scopes: global (All APIs), product,
-API and operation. `<base />` means "run the policy of the parent scope here". The proxy
-policy is an **API-level** policy (it applies to all six operations of `ado-mcp-proxy`).
-The OAuth policies are **operation-level** policies. Their `<base />` first runs the
-API-level policy of `ado-mcp-oauth-compat`, which is a CORS policy (any origin, `GET` and
-`POST`) defined inline in `infra/modules/mcp-proxy.bicep`. That is how browser-based
+API and operation. `<base />` means "run the policy of the parent scope here". The two MCP
+server policies are **API-level** policies (an MCP server has no operations). The OAuth
+policies are **operation-level** policies. Their `<base />` first runs the API-level policy
+of the plain API they run in (`ado-mcp-proxy-prm`, `ado-mcp-proxy-oauth` or a discovery
+alias), which is a CORS policy (any origin, `GET` and `POST`) defined inline in
+`infra/modules/mcp-proxy.bicep`. That is how browser-based
 clients such as MCP Inspector get past CORS preflight requests.
 
 **Policy expressions.** Values that start with `@` are C# snippets evaluated per request:
@@ -87,7 +88,8 @@ clients such as MCP Inspector get past CORS preflight requests.
 
 - `<return-response>` stops the pipeline and sends a response built by the policy. No
   backend is called and the `outbound` section does not run. The metadata, register and
-  authorize endpoints work this way, and so do the proxy's error answers.
+  authorize endpoints work this way, and so do the working setup's error answers (`400`,
+  `404`).
 - `<forward-request>` (usually reached through `<backend><base /></backend>`) sends the
   request to the backend that `<set-backend-service>` or the API selected.
 
@@ -98,16 +100,15 @@ Its root element is `<fragment>`; it contains no `<base />` and no section tags,
 in whatever section includes it. Fragments are **service-wide**, so they take no per-API
 parameters. They read **context variables** that the including policy sets before the
 include, and **named values** (`{{name}}`, service-wide settings you can change in the
-portal under *Named values* without redeploying). This lab uses five fragments; see
+portal under *Named values* without redeploying). This lab uses four fragments; see
 [How the policies are composed](#how-the-policies-are-composed-fragments).
 
 **Where the placeholders come from.** The XML files contain tokens such as `__TENANT_ID__`.
 APIM never sees them. Bicep loads each file with `loadTextContent()` and replaces the tokens
 before deployment: `infra/modules/mcp-proxy.bicep` uses a small `fill()` function (a
-`reduce()` over `replace()`), and `mcp-native.bicep` and `mcp-tool-validation.bicep` use
-nested `replace()` calls. Because the replacement is plain text, the policy comments refer
-to placeholders without their underscores ("the SCOPE placeholder"). Fragments use no
-placeholders except `mcp-tool-validation`; the other four read named values instead.
+`reduce()` over `replace()`). `native-mcp.xml` has no placeholders. Because the replacement
+is plain text, the policy comments refer to placeholders without their underscores ("the
+SCOPE placeholder"). Fragments use no placeholders; they read named values instead.
 
 | Placeholder | Filled by | Value |
 |---|---|---|
@@ -115,13 +116,9 @@ placeholders except `mcp-tool-validation`; the other four read named values inst
 | `SCOPE` / `SCOPE_ENC` | `mcp-proxy.bicep` | `https://mcp.dev.azure.com/.default`, plain / URL-encoded |
 | `RESOURCE_ENC` | `mcp-proxy.bicep` | `https://mcp.dev.azure.com`, URL-encoded |
 | `CLIENT_ID` | `mcp-proxy.bicep` | `publicClientId` parameter (from `scripts/setup-entra.ps1`) |
-| `BACKEND_ID` | `mcp-proxy.bicep` | Backend `ado-mcp-origin` (`https://mcp.dev.azure.com`) |
+| `PROXY_PATH` | `mcp-proxy.bicep` | `proxyApiPath` parameter, the working setup's dedicated path (`ado-mcp-proxy`) |
+| `OAUTH_PATH` | `mcp-proxy.bicep` | Its OAuth issuer path (`ado-mcp-proxy/oauth`) |
 | `RATE_LIMIT_CALLS` / `RATE_LIMIT_PERIOD` | `mcp-proxy.bicep` | `rateLimitCalls` / `rateLimitPeriod` (default 60 calls per 60 s) |
-| `TOOL_VALIDATION` | `mcp-proxy.bicep` | `<include-fragment fragment-id="mcp-tool-validation" />` when `toolValidation` is true |
-| `TOOL_BRANCHES` | `mcp-tool-validation.bicep` | One `<when>` with `<validate-content>` per vetted tool |
-| `VETTED_TOOLS` | `mcp-tool-validation.bicep` | Comma-separated vetted tool names |
-| `DENY_UNLISTED` | `mcp-tool-validation.bicep` | `true` when `unlistedToolAction` is `deny` |
-| `DEBUG_RAW` | `mcp-tool-validation.bicep` | Empty, unless the lab-only `toolValidationDebug` flag is set |
 
 **Named values** (created by `infra/modules/policy-fragments.bicep` from the Bicep
 parameters; read by fragments as `{{name}}`). Named values cannot be empty, so `*` means
@@ -133,7 +130,9 @@ parameters; read by fragments as `{{name}}`). Named values cannot be empty, so `
 | `mcp-readonly` | `readOnly` | `mcp-backend-headers` | `true` or `false` |
 | `mcp-toolsets` | `toolsets` | `mcp-backend-headers` | Comma-separated toolsets, or `*` (no `X-MCP-Toolsets` header) |
 
-Changing a named value in the portal takes effect at once, for both setups. The next
+Changing a named value in the portal takes effect at once: `mcp-readonly` and
+`mcp-toolsets` for both setups, `mcp-allowed-organizations` for the working setup only (the
+regular setup does not include `mcp-org-validation`). The next
 deployment resets it to the Bicep parameter, so change the parameter too.
 
 **How `<trace>` reaches Application Insights.** Each API has an `applicationinsights`
@@ -145,8 +144,8 @@ request in `AppRequests` (`AppTraces.ParentId == AppRequests.Id`). Every policy 
 a `step` value, so one KQL filter shows the whole flow. Reference:
 [trace policy](https://learn.microsoft.com/azure/api-management/trace-policy). The tables
 (`AppRequests`, `AppTraces`, `ApiManagementGatewayLogs` and others) and what lands in each
-are explained in [OBSERVABILITY.md](OBSERVABILITY.md). The MCP APIs log an allow-list of
-headers; the OAuth compatibility API logs only the `User-Agent` request header (no bodies,
+are explained in [OBSERVABILITY.md](OBSERVABILITY.md). The MCP servers log an allow-list of
+headers; the PRM, OAuth and alias APIs log only the `User-Agent` request header (no bodies,
 `code` and `state` masked), which is how [`client-signins.kql`](kql/client-signins.kql)
 tells the clients apart.
 
@@ -160,19 +159,22 @@ Data arrives 2 to 5 minutes after the request.
 
 ## Policy map
 
-The regular setup has one policy. The working setup has one data-plane policy, one fragment
-and five OAuth policies, listed in the order a client calls them.
+The regular setup has one policy. The working setup has one MCP server policy and five OAuth
+policies, listed in the order a client calls them.
 
 | # | Policy | API / operation | URL (relative to `https://<gateway>`) | When it runs | Trace `step` |
 |---|---|---|---|---|---|
 | 1 | `native-mcp.xml` | `ado-mcp-native` (type MCP), API level | `/ado-mcp-native/<org>` | Every request of the regular setup | `native-inbound`, `native-outbound` |
-| 2 | `proxy-mcp.xml` | `ado-mcp-proxy` (type HTTP), API level, operations `mcp-post`, `mcp-get`, `mcp-delete` and their `-org` variants | `/ado-mcp-proxy/<org>` and `/ado-mcp-proxy` | First call (gets the 401), then every MCP message | `proxy-inbound`, `proxy-outbound`, `proxy-error` |
-| 2a | `tool-validation.xml` | Fragment `mcp-tool-validation`, included in the proxy's inbound | Same as 2 | Every proxy request; acts on `tools/call` | `tool-validation` |
-| 3 | `oauth-prm.xml` | `ado-mcp-oauth-compat`, operations `protected-resource-metadata` and `protected-resource-metadata-org` | `/.well-known/oauth-protected-resource/ado-mcp-proxy[/<org>]` | Right after the 401 | `prm` |
-| 4 | `oauth-as-metadata.xml` | `ado-mcp-oauth-compat`, operations `authorization-server-metadata` and `openid-configuration` | `/.well-known/oauth-authorization-server`, `/.well-known/openid-configuration` | After the PRM | `as-metadata` |
-| 5 | `oauth-register.xml` | `ado-mcp-oauth-compat`, operation `register` | `POST /register` | Once per client installation (clients that use DCR) | `register` |
-| 6 | `oauth-authorize.xml` | `ado-mcp-oauth-compat`, operation `authorize` | `GET /authorize` | In the browser, at sign-in | `authorize` |
-| 7 | `oauth-token.xml` | `ado-mcp-oauth-compat`, operation `token` | `POST /token` | After sign-in (code) and on every refresh | `token`, `token-response` |
+| 2 | `proxy-mcp.xml` | `ado-mcp-proxy` (type MCP, an MCP server), API level, no operations | `/ado-mcp-proxy/<org>` and `/ado-mcp-proxy` | First call (gets the 401), then every MCP message | `proxy-inbound`, `proxy-outbound`, `proxy-error` |
+| 3 | `oauth-prm.xml` | `ado-mcp-proxy-prm` (path `ado-mcp-proxy/.well-known/oauth-protected-resource`), operations `protected-resource-metadata` (`GET /`) and `protected-resource-metadata-org` (`GET /{org}`); alias API `ado-mcp-proxy-discovery-prm` (same operations) | `/ado-mcp-proxy/.well-known/oauth-protected-resource[/<org>]`; alias `/.well-known/oauth-protected-resource/ado-mcp-proxy[/<org>]` | Right after the 401 | `prm` |
+| 4 | `oauth-as-metadata.xml` | `ado-mcp-proxy-oauth`, operations `authorization-server-metadata` and `openid-configuration`; alias APIs `ado-mcp-proxy-discovery-as` and `-oidc` | `/ado-mcp-proxy/oauth/.well-known/oauth-authorization-server` and `/openid-configuration`; aliases `/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth`, `/.well-known/openid-configuration/ado-mcp-proxy/oauth` | After the PRM | `as-metadata` |
+| 5 | `oauth-register.xml` | `ado-mcp-proxy-oauth`, operation `register` | `POST /ado-mcp-proxy/oauth/register` | Once per client installation (clients that use DCR) | `register` |
+| 6 | `oauth-authorize.xml` | `ado-mcp-proxy-oauth`, operation `authorize` | `GET /ado-mcp-proxy/oauth/authorize` | In the browser, at sign-in | `authorize` |
+| 7 | `oauth-token.xml` | `ado-mcp-proxy-oauth`, operation `token` | `POST /ado-mcp-proxy/oauth/token` | After sign-in (code) and on every refresh | `token`, `token-response` |
+
+Nothing is mounted at the gateway root: every working-setup URL starts with
+`/ado-mcp-proxy` or is a `/.well-known/...` alias that ends in `/ado-mcp-proxy[...]`
+([Isolation](../README.md#isolation-the-working-setup-owns-one-dedicated-path)).
 
 To see all steps of one sign-in in order, run
 [`client-signins.kql`](kql/client-signins.kql) (OAuth steps per client) or
@@ -189,7 +191,6 @@ in its own policy, because each endpoint does one distinct thing.
 |---|---|---|---|---|---|
 | `mcp-org-validation` (`org-validation.xml`) | | inbound | inbound | | `{{mcp-allowed-organizations}}`, variable `org-404-body` |
 | `mcp-caller-identity` (`caller-identity.xml`) | inbound | inbound | | | `Authorization` header |
-| `mcp-tool-validation` (`tool-validation.xml`) | not possible (no operations) | inbound | | | Request body, schemas |
 | `mcp-backend-headers` (`backend-headers.xml`) | inbound | inbound | | | `{{mcp-readonly}}`, `{{mcp-toolsets}}` |
 | `mcp-response-headers` (`response-headers.xml`) | outbound, on-error | outbound, on-error | | outbound | none |
 
@@ -199,8 +200,8 @@ flowchart LR
         direction TB
         p1["HTTPS only"] --> p2[["mcp-org-validation"]] --> p3["correlation id"] --> p4["MCP method"]
         p4 --> p5[["mcp-caller-identity"]] --> p6["trace"] --> p7["rate limit"]
-        p7 --> p8[["mcp-tool-validation"]] --> p9[["mcp-backend-headers"]] --> p10["forward, no buffering"]
-        p10 --> p11["challenge rewrite"] --> p12[["mcp-response-headers"]] --> p13["trace"]
+        p7 --> p8[["mcp-backend-headers"]] --> p9["forward"]
+        p9 --> p10[["mcp-response-headers"]] --> p11["trace"]
     end
     subgraph native["native-mcp.xml (regular setup)"]
         direction TB
@@ -215,10 +216,11 @@ flowchart LR
     end
 ```
 
-Double-bordered boxes are fragments. Because both MCP APIs include the same
-`mcp-backend-headers`, the regular and the working setup apply **identical governance**
-(read-only, toolsets, header hygiene). The only difference left between them is the OAuth
-discovery, which is the point of the comparison.
+Double-bordered boxes are fragments. Because both MCP servers include the same
+`mcp-backend-headers`, the regular and the working setup apply **identical backend
+governance** (read-only, toolsets, header hygiene). The working setup adds HTTPS
+enforcement, the organization allow-list, a rate limit and a correlation ID. For sign-in,
+the difference that matters is the OAuth discovery, which is the point of the comparison.
 
 **Deployment order.** `infra/modules/policy-fragments.bicep` creates the named values, then
 the fragments (`dependsOn`), and `main.bicep` deploys the native and proxy modules after it.
@@ -271,13 +273,15 @@ client registration"*). Details per client: [CLIENTS-APIM-CHANGES.md](CLIENTS-AP
 - The rewrite of `resource_metadata` and of the PRM `resource` is built in. No policy
   element can change it.
 - The API has **no operations**. `validate-content` needs an operation with a declared
-  request representation, so including the tool validation fragment made **every** native
-  request fail with HTTP 500 (`OperationNotFound`). This policy therefore does not include
-  it. The other fragments contain no `validate-content` and work on the native API
-  (verified in the lab).
-- In return, only native MCP APIs get MCP-aware logs: the `ApiManagementGatewayMCPLog` table
+  request representation, so including it made **every** request fail with HTTP 500
+  (`OperationNotFound`). Neither MCP server policy includes it
+  ([TOOL-VALIDATION.md](TOOL-VALIDATION.md)). The shared fragments contain no
+  `validate-content` and work on both MCP servers (verified in the lab).
+- In return, MCP servers get MCP-aware logs: the `ApiManagementGatewayMCPLog` table
   ([`mcp-methods.kql`](kql/mcp-methods.kql)) and the `gen_ai.*` dimensions in
-  `AppRequests` ([`mcp-calls-app-insights.kql`](kql/mcp-calls-app-insights.kql)).
+  `AppRequests` ([`mcp-calls-app-insights.kql`](kql/mcp-calls-app-insights.kql)), for both
+  MCP servers (verified in the lab: `McpServerEndpoint` `/ado-mcp-native` and
+  `/ado-mcp-proxy`, with methods, tool names and client names).
 
 Reference: [Expose an existing MCP server in APIM](https://learn.microsoft.com/azure/api-management/expose-existing-mcp-server).
 
@@ -376,28 +380,33 @@ rejection without a browser.
 
 ## Working setup
 
-The working setup replaces the native API with a plain HTTP API plus five small OAuth
-endpoints on the gateway host. The idea: the client only ever talks to the gateway URL, and
-the gateway translates the one value Entra cannot accept (the `resource`) before Entra sees
-it. The user's own token still reaches Azure DevOps unchanged.
+The working setup uses the same API type as the regular setup, an APIM **MCP server** with
+the same backend, and adds five small plain HTTP APIs under its own path that answer OAuth
+discovery. The decisive difference: the PRM URL that APIM advertises in the 401 challenge is
+answered by the setup's own PRM API, which names the gateway's OAuth facade instead of
+Entra. The client then only ever talks to the gateway URL, and the gateway translates the
+one value Entra cannot accept (the `resource`) before Entra sees it. The user's own token
+still reaches Azure DevOps unchanged.
 
 ## 2. `proxy-mcp.xml`: the MCP data plane
 
 ### What it does
 
-The policy of the HTTP API `ado-mcp-proxy`. It forwards MCP traffic from
-`https://<gateway>/ado-mcp-proxy/<org>` to `https://mcp.dev.azure.com/<org>` and:
+The policy of the MCP server `ado-mcp-proxy` (APIM → *APIs → MCP servers*, display name
+*Azure DevOps MCP (working, ado-mcp-proxy)*). The MCP server forwards MCP traffic from
+`https://<gateway>/ado-mcp-proxy/<org>` to `https://mcp.dev.azure.com/<org>` (backend
+`ado-mcp-origin`) and streams the response. The policy only governs the edge:
 
-- checks HTTPS and the organization name (allow-list), and rate-limits per client IP;
-- runs tool argument validation (fragment, section 2a);
-- sets the server-side tool restriction headers `X-MCP-Readonly` and `X-MCP-Toolsets`;
-- removes request headers a client could spoof;
-- forwards the caller's Entra token **unchanged**, so Azure DevOps authorizes and audits the
-  signed-in user;
-- streams the [SSE](GLOSSARY.md#sse-streamable-http) response without buffering;
-- replaces the origin's `401` challenge with one that points at APIM-hosted metadata for
-  this exact URL;
-- adds a correlation ID and writes telemetry.
+- checks HTTPS and the organization name (allow-list);
+- sets a correlation ID and records the MCP method and the caller for telemetry;
+- rate-limits per client IP;
+- sets the server-side tool restriction headers `X-MCP-Readonly` and `X-MCP-Toolsets`, and
+  removes request headers a client could spoof;
+- adds response headers for support.
+
+The caller's Entra token is forwarded **unchanged**, so Azure DevOps authorizes and audits
+the signed-in user. The policy has no `<forward-request>` of its own, does not rewrite the
+`401` challenge and does not validate tool arguments.
 
 `https://<gateway>/ado-mcp-proxy` without an organization is the "bare" endpoint; Azure
 DevOps tools then need an `orgName` argument. One deployment serves many organizations.
@@ -405,21 +414,22 @@ DevOps tools then need an `orgName` argument. One deployment serves many organiz
 
 ### Why it is needed
 
-- **Discovery must lead to a consistent resource and scope.** Under
+- **Governance at the edge**: organization allow-list, rate limit, header hygiene,
+  correlation and telemetry, without touching the user's identity. The regular setup shares
+  the header-hygiene, read-only/toolsets and telemetry fragments, but not the allow-list,
+  rate limit, HTTPS check or correlation ID.
+- **Discovery is handled outside this policy.** Under
   [MCP authorization](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization),
-  a `401` carries `WWW-Authenticate: Bearer resource_metadata="..."`. The origin's value
-  points at `mcp.dev.azure.com` metadata whose `resource` is `https://mcp.dev.azure.com/<org>`,
-  which does not equal the URL the client connected to
-  ([RFC 9728 section 3.3](https://datatracker.ietf.org/doc/html/rfc9728#section-3.3)). The
-  proxy points the client at APIM-hosted metadata instead (sections 3 to 7).
-- **The challenge should carry the scope.**
-  [MCP authorization 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)
-  recommends a `scope` parameter in the challenge. GitHub Copilot CLI uses it.
+  a `401` carries `WWW-Authenticate: Bearer resource_metadata="..."`. The MCP server
+  generates it, as on the regular setup:
+  `resource_metadata="https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>"`
+  (bare endpoint: `.../oauth-protected-resource/`). The plain API `ado-mcp-proxy-prm`
+  answers that URL (section 3), because API Management routes to the most specific API
+  path. That is what makes sign-in work. The challenge carries no `scope` parameter;
+  `/authorize` and `/token` add the scope when a client sends none (sections 6 and 7).
 - **Streaming must stay intact.** The
   [Streamable HTTP transport](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
-  answers a POST with `text/event-stream`. APIM must pass each event on as it arrives.
-- **Governance at the edge**: organization allow-list, rate limit, header hygiene and
-  correlation, without touching the user's identity.
+  answers a POST with `text/event-stream`. The policy never reads the response body.
 
 ### Step by step
 
@@ -430,12 +440,13 @@ DevOps tools then need an `orgName` argument. One deployment serves many organiz
    A bearer token must never travel unencrypted. The API only lists the `https` protocol,
    so this is defence in depth.
 3. **Organization (fragment `mcp-org-validation`).** The policy first sets
-   `org-404-body` to `json`, then includes the fragment. It reads `{org}` from the URL
-   template into the variable `org` (empty on the bare endpoint). If `org` is set and does
-   not match `^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$`, or `{{mcp-allowed-organizations}}` is not
-   `*` and does not contain it (case-insensitive), it returns
-   `404 {"error":"unknown_organization"}`. The regular expression blocks path tricks; the
-   allow-list keeps the gateway from serving organizations you did not intend.
+   `org-404-body` to `json`, then includes the fragment. An MCP server has no URL template,
+   so the fragment reads the path after the API path (`context.Api.Path`) into the variable
+   `org` (empty on the bare endpoint). If `org` is set and does not match
+   `^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$`, or `{{mcp-allowed-organizations}}` is not `*` and
+   does not contain it (case-insensitive), it returns `404 {"error":"unknown_organization"}`.
+   The regular expression blocks path tricks; the allow-list keeps the gateway from serving
+   organizations you did not intend.
 4. **`set-variable correlation-id`**: a caller-supplied `X-Correlation-ID` is reused only if
    it is a GUID (this prevents log injection); otherwise the APIM request ID is used.
 5. **`set-variable mcp-method`**: the [JSON-RPC](GLOSSARY.md#json-rpc) `method` from the request body
@@ -443,71 +454,62 @@ DevOps tools then need an `orgName` argument. One deployment serves many organiz
    DELETE probes) or with a non-JSON body fall back to the HTTP method, and a JSON-RPC
    *response* sent by the client shows as `(response)`.
 6. **Fragment `mcp-caller-identity`**, then **`<trace>` step `proxy-inbound`**: MCP method,
-   organization, correlation ID, the user's object ID (`caller-oid`) and the client app ID
-   (`caller-app-id`). The token is decoded only to read these claims; it is not validated
-   here and never logged.
+   organization, `auth=bearer|none`, correlation ID, the user's object ID (`caller-oid`) and
+   the client app ID (`caller-app-id`). The token is decoded only to read these claims; it
+   is not validated here and never logged.
 7. **`rate-limit-by-key`**: at most `RATE_LIMIT_CALLS` calls per `RATE_LIMIT_PERIOD` seconds
    per client IP, then `429` with `Retry-After`. This protects the backend and the user's
    Azure DevOps request budget.
-8. **`TOOL_VALIDATION` slot**: `<include-fragment fragment-id="mcp-tool-validation" />`
-   when `toolValidation` is true (section 2a). It runs before forwarding, so an invalid
-   `tools/call` never reaches Azure DevOps.
-9. **Fragment `mcp-backend-headers`**: `X-MCP-Readonly: true` when `{{mcp-readonly}}` is
-    `true`, and `X-MCP-Toolsets: <list>` when `{{mcp-toolsets}}` is not `*` (the server then
-    only offers those tool groups). Before that it deletes `Forwarded`, `X-Forwarded-*`, `X-Original-Host`,
-    `X-Original-URL`, `X-Rewrite-URL`, `Proxy-Authorization`, `Proxy-Connection`, the App
-    Service identity headers `X-MS-CLIENT-PRINCIPAL*` and `X-MS-TOKEN-AAD-ACCESS-TOKEN`, and
-    APIM's own `Ocp-Apim-Trace*`. Clients could otherwise make the backend believe things
-    APIM never checked.
-10. **`X-Correlation-ID`** is set on the backend request.
-11. **`set-backend-service backend-id=BACKEND_ID`**: the backend `ado-mcp-origin`
-    (`https://mcp.dev.azure.com`). APIM appends the rest of the client path (`/<org>`), so
-    one backend serves every organization.
+8. **Fragment `mcp-backend-headers`**: `X-MCP-Readonly: true` when `{{mcp-readonly}}` is
+   `true`, and `X-MCP-Toolsets: <list>` when `{{mcp-toolsets}}` is not `*` (the server then
+   only offers those tool groups). Before that it deletes `Forwarded`, `X-Forwarded-*`,
+   `X-Original-Host`, `X-Original-URL`, `X-Rewrite-URL`, `Proxy-Authorization`,
+   `Proxy-Connection`, the App Service identity headers `X-MS-CLIENT-PRINCIPAL*` and
+   `X-MS-TOKEN-AAD-ACCESS-TOKEN`, and APIM's own `Ocp-Apim-Trace*`. Clients could otherwise
+   make the backend believe things APIM never checked.
+9. **`X-Correlation-ID`** is set on the backend request.
 
 **Backend**
 
-12. `<forward-request follow-redirects="false" buffer-response="false" timeout="240" />`
-    (no `<base />` on purpose).
-    - `buffer-response="false"` streams SSE events as they arrive.
-    - `follow-redirects="false"` returns redirects to the client instead of following them
-      with the user's token.
-    - `timeout="240"` leaves room for long tool calls.
+10. `<base />`: the MCP server forwards to its backend `ado-mcp-origin` (the bare host
+    `https://mcp.dev.azure.com`) and appends the rest of the client path (`/<org>`), so one
+    backend serves every organization. The response streams back without buffering.
 
 **Outbound**
 
-13. `<base />`.
-14. **Challenge rewrite.** For status `401` the `WWW-Authenticate` header is replaced with
-    `Bearer resource_metadata="https://<gateway>/.well-known/oauth-protected-resource/<path>", scope="SCOPE"`.
-    `<path>` is the request path without a trailing slash (`/ado-mcp-proxy/<org>`), which is
-    the [RFC 9728 path-insertion](https://datatracker.ietf.org/doc/html/rfc9728#section-3.1)
-    form of the URL the client used. The host comes from the request, so custom domains
-    work.
-15. **Fragment `mcp-response-headers`**: `Cache-Control: no-store` (MCP responses and
-    challenges are per user) and `x-apim-request-id`.
-16. **`X-Correlation-ID`** goes back to the client for support.
-17. **`<trace>` step `proxy-outbound`** with status code and correlation ID. Only the status
+11. `<base />`.
+12. **Fragment `mcp-response-headers`**: `Cache-Control: no-store` (MCP responses are per
+    user) and `x-apim-request-id`.
+13. **`X-Correlation-ID`** goes back to the client for support.
+14. **`<trace>` step `proxy-outbound`** with status code and correlation ID. Only the status
     code is read, never `context.Response.Body` (that would buffer SSE).
 
 **On-error**
 
-18. `<base />`, then `<trace>` step `proxy-error` (severity error) with `LastError.Reason`,
+15. `<base />`, then `<trace>` step `proxy-error` (severity error) with `LastError.Reason`,
     `Message` and `Source` (the policy that failed).
-19. The same `mcp-response-headers` fragment and `X-Correlation-ID` header.
+16. The same `mcp-response-headers` fragment and `X-Correlation-ID` header.
     `GetValueOrDefault` is used because the error can occur before `correlation-id` was set.
 
 ### What breaks without it
 
-- **Without the challenge rewrite** the client reads the origin's PRM, whose `resource`
-  (`https://mcp.dev.azure.com/<org>`) differs from the gateway URL. VS Code rejects that PRM
-  and sign-in never starts. Other clients would end at Entra with a mismatch.
-- **With `buffer-response="true"`** (or any read of `context.Response.Body`) APIM holds all
-  SSE events until the stream ends. Clients see no progress and long calls time out.
-- **Without the organization check** any path segment reaches Azure DevOps, including
-  mistakes such as `/mcp` (the server treats it as an organization named `mcp` and fails
-  with `VS30063`, see [`backend-url-mapping.kql`](kql/backend-url-mapping.kql)).
-- **Without `mcp-backend-headers`** the server offers its write tools as well.
-- **Without header hygiene** a client can inject forwarding or identity headers that the
-  backend might trust.
+Sign-in does not depend on this policy: the challenge comes from the MCP server and the
+PRM from section 3. Without the policy you lose:
+
+- **the organization check**: any path segment reaches Azure DevOps, including mistakes such
+  as `/mcp` (the server treats it as an organization named `mcp` and fails with `VS30063`,
+  see [`backend-url-mapping.kql`](kql/backend-url-mapping.kql));
+- **`mcp-backend-headers`**: the server offers its write tools as well, and a client can
+  inject forwarding or identity headers that the backend might trust;
+- the rate limit, the correlation ID and the `proxy-*` traces.
+
+Reading `context.Response.Body` anywhere in this policy would make APIM hold all SSE events
+until the stream ends. Clients would see no progress and long calls would time out.
+
+**No tool argument validation.** `validate-content` needs API operations, and an MCP server
+has none: including it made every request fail with HTTP 500. The hosted server therefore
+receives `tools/call` arguments unchanged. Options to add validation are in
+[TOOL-VALIDATION.md](TOOL-VALIDATION.md).
 
 ### Sample request and response
 
@@ -521,10 +523,7 @@ Accept: application/json, text/event-stream
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}
 
 HTTP/1.1 401 Unauthorized
-WWW-Authenticate: Bearer resource_metadata="https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>", scope="https://mcp.dev.azure.com/.default"
-Cache-Control: no-store
-X-Correlation-ID: <guid>
-x-apim-request-id: <request-id>
+WWW-Authenticate: Bearer resource_metadata="https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>"
 ```
 
 After sign-in:
@@ -562,7 +561,7 @@ $gw = 'https://<gateway>'
 $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 $h = @{ Accept = 'application/json, text/event-stream' }
 
-# 401 that points at APIM-hosted metadata, with scope
+# 401 whose resource_metadata names /ado-mcp-proxy/.well-known/oauth-protected-resource/<org>
 Invoke-WebRequest "$gw/ado-mcp-proxy/<org>" -Method Post -Body $init -ContentType application/json -Headers $h -SkipHttpErrorCheck |
   Select-Object StatusCode, @{ n = 'WWW-Authenticate'; e = { $_.Headers['WWW-Authenticate'] } }
 
@@ -579,137 +578,8 @@ Logs:
 
 - [`policy-traces.kql`](kql/policy-traces.kql): `proxy-inbound` / `proxy-outbound` with
   MCP method, organization, user `oid` and client app ID.
-- [`www-authenticate-rewrite.kql`](kql/www-authenticate-rewrite.kql): origin challenge
-  versus APIM challenge.
 - [`errors.kql`](kql/errors.kql): failures with the pipeline stage that raised them.
 - [`auth-summary.kql`](kql/auth-summary.kql): requests per API, auth type and status.
-
----
-
-## 2a. `tool-validation.xml`: tool argument validation fragment
-
-### What it does
-
-For a JSON-RPC `tools/call` naming a **vetted** tool, the fragment validates the whole
-request body against a JSON schema stored in APIM (`mcp-tool-<tool>`, for example
-`mcp-tool-core-list-projects`). Each schema wraps the curated `arguments` schema from
-`infra/schemas/tools/<tool>.json` in a JSON-RPC envelope with `additionalProperties: false`.
-A violation is answered by the gateway with a JSON-RPC error that names the field and the
-rule, never the submitted value. Azure DevOps never sees the call. Everything else passes
-through untouched.
-
-### Why it is needed
-
-- The hosted server is lenient. In the lab it accepted `top: "5"` (a string), `top: 500`
-  and unknown properties such as `query` or `wiql`. Security teams often want a vetted
-  argument manifest enforced at the gateway, as for REST APIs.
-- The error format follows the MCP tools spec:
-  - [2025-06-18](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#error-handling):
-    invalid arguments are a protocol error, JSON-RPC `-32602 Invalid params`.
-  - [2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/server/tools#error-handling):
-    input validation errors are tool execution errors (`result.isError: true`), so the model
-    can correct itself.
-- Under [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports),
-  a JSON-RPC request gets a JSON-RPC response, so the HTTP status is `200`.
-- APIM reference: [validate-content](https://learn.microsoft.com/azure/api-management/validate-content-policy).
-- The design (why static schemas, `detect` versus `prevent`, error format, limitations, how to
-  add a tool) is in [TOOL-VALIDATION.md](TOOL-VALIDATION.md). This section follows the XML.
-
-### Step by step
-
-1. **`set-variable mcp-tool`** reads the request body as text.
-   - A body starting with `[` is a JSON-RPC **batch**: the value is `(batch)`. Batching was
-     removed in MCP 2025-06-18, and a batch could hide a call from validation.
-   - For `"method": "tools/call"` the value is `params.name`, trimmed and **lower-cased**,
-     so `CORE_LIST_PROJECTS` cannot slip past. The schema then requires the exact name, so a
-     case variant is rejected with `params.name` / `const`.
-   - Anything else gives an empty value.
-   - The `Body == null` check matters: OpenAI Codex probes the MCP URL with a body-less GET,
-     which produced HTTP 500 before the check was added.
-2. **`<choose>` with the `TOOL_BRANCHES` slot.** Bicep generates one `<when>` per vetted
-   tool:
-   `<validate-content unspecified-content-type-action="ignore" max-size="65536" size-exceeded-action="detect" errors-variable-name="mcp-validation-errors">`
-   with `<content type="application/json" validate-as="json" schema-id="mcp-tool-<tool>" action="detect" />`.
-   - One branch per tool, because `validate-content` cannot pick a schema at run time.
-   - `detect`, not `prevent`: `prevent` answers with APIM's own `400` body, which is not
-     JSON-RPC and echoes the submitted value. `detect` only stores the errors in the
-     variable `mcp-validation-errors`.
-   - `validate-content` only checks content types the **operation** declares. That is why
-     `mcp-proxy.bicep` declares an `application/json` request representation on the POST
-     operations, and why the fragment cannot run on the native MCP API (no operations).
-3. **`set-variable mcp-validation`** decides:
-
-   | Value | Meaning |
-   |---|---|
-   | empty | Not a `tools/call`; nothing to do |
-   | `passed` | Vetted tool, no schema errors |
-   | `rejected` | Vetted tool, schema errors |
-   | `unlisted` | No schema for this tool, and unlisted tools are allowed |
-   | `denied` | A batch, or an unlisted tool while `DENY_UNLISTED` is true |
-
-4. **Rejected or denied** (`<when>` 1):
-   1. `set-variable mcp-violations` turns the raw `validate-content` messages into
-      `[{"field":"top","rule":"type"}, ...]`. Known messages map to rules (`type`,
-      `maximum`, `minimum`, `enum`, `required`, `additionalProperties`, `maxLength`,
-      `minLength`, `pattern`, `const`, `maxItems`, `minItems`; otherwise `invalid`). The
-      raw messages can contain submitted values, so they never reach the client or the trace.
-   2. `<trace>` step `tool-validation` (severity error): result, tool and violations.
-   3. `<return-response>`: HTTP `200`, `Content-Type: application/json`,
-      `x-mcp-gateway-validation: rejected|denied`, `x-apim-request-id`, `Cache-Control: no-store`.
-      The body echoes the request `id`. With `MCP-Protocol-Version` `2025-11-25` or later
-      (and not `denied`) it is `result.isError: true`; otherwise `error.code -32602` with
-      `data.tool`, `data.violations` and `data.source: "api-gateway"`. `DEBUG_RAW` is empty
-      unless the lab-only debug flag adds the raw messages.
-5. **Passed or unlisted** (`<when>` 2): `<trace>` step `tool-validation` (severity
-   information) and the request continues to Azure DevOps.
-
-### What breaks without it
-
-Nothing breaks, but nothing is checked: the server runs `core_list_projects` with
-`top: "5"` or `top: 500` and accepts unknown properties. With `prevent` instead of `detect`
-the client would get a non-JSON-RPC `400` that most MCP clients show as a transport error.
-
-Note: `validate-content` also writes its full error text (which can contain submitted values)
-to Application Insights **exceptions** (`ContentInvalid`), even in `detect` mode. Restrict
-access to that table if arguments can be sensitive.
-
-### Sample request and response
-
-```http
-POST https://<gateway>/ado-mcp-proxy/<org>
-Authorization: Bearer <access-token>
-Content-Type: application/json
-MCP-Protocol-Version: 2025-06-18
-
-{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":"5","query":1}}}
-
-HTTP/1.1 200 OK
-Content-Type: application/json
-x-mcp-gateway-validation: rejected
-
-{"jsonrpc":"2.0","id":11,"error":{"code":-32602,
- "message":"Invalid arguments for tool core_list_projects: top violates type; query violates additionalProperties. Rejected by the API gateway before reaching the server.",
- "data":{"tool":"core_list_projects","violations":[{"field":"top","rule":"type"},{"field":"query","rule":"additionalProperties"}],"source":"api-gateway"}}}
-```
-
-With `MCP-Protocol-Version: 2025-11-25` the same call returns
-`{"jsonrpc":"2.0","id":11,"result":{"content":[{"type":"text","text":"Invalid arguments for tool core_list_projects: ..."}],"isError":true}}`.
-
-### How to verify
-
-```powershell
-$gw = 'https://<gateway>'
-$token = az account get-access-token --scope https://mcp.dev.azure.com/.default --query accessToken -o tsv
-$h = @{ Authorization = "Bearer $token"; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-06-18' }
-$body = '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":"5","query":1}}}'
-$r = Invoke-WebRequest "$gw/ado-mcp-proxy/<org>" -Method Post -Body $body -ContentType application/json -Headers $h
-$r.Headers['x-mcp-gateway-validation']   # rejected
-$r.Content                               # {"jsonrpc":"2.0","id":11,"error":{"code":-32602,...}}
-```
-
-Then run [`tool-validation.kql`](kql/tool-validation.kql): rejected rows show
-`reachedBackend: false` and no `BackendResponseCode`, which proves Azure DevOps was never
-called. More cases: [TESTING.md section 5](TESTING.md#5-tool-argument-validation-working-setup).
 
 ---
 
@@ -717,15 +587,25 @@ called. More cases: [TESTING.md section 5](TESTING.md#5-tool-argument-validation
 
 ### What it does
 
-Answers `GET /.well-known/oauth-protected-resource/ado-mcp-proxy/<org>` (and the variant
-without `<org>`) directly from APIM with a PRM document computed from the request URL:
+Runs on the plain API `ado-mcp-proxy-prm` (path
+`ado-mcp-proxy/.well-known/oauth-protected-resource`) and on the alias API
+`ado-mcp-proxy-discovery-prm`. It answers
+`GET /ado-mcp-proxy/.well-known/oauth-protected-resource/<org>` (the URL the MCP server's
+401 challenge names) and the alias
+`GET /.well-known/oauth-protected-resource/ado-mcp-proxy/<org>` (and both variants without
+`<org>`) directly from APIM with a PRM document:
 
 - `resource` = the URL the client connects to (`https://<gateway>/ado-mcp-proxy/<org>`);
-- `authorization_servers` = the gateway origin (`https://<gateway>`), not Entra;
+- `authorization_servers` = the gateway's OAuth facade (`https://<gateway>/ado-mcp-proxy/oauth`), not Entra;
 - `scopes_supported` = `https://mcp.dev.azure.com/.default`.
 
 ### Why it is needed
 
+- **It replaces APIM's built-in metadata.** The MCP server would answer the URL in its
+  challenge with APIM's own PRM, which names Entra as authorization server (the regular
+  setup's failure). API Management routes to the most specific API path, so the API
+  `ado-mcp-proxy-prm` at `/ado-mcp-proxy/.well-known/oauth-protected-resource` takes
+  precedence over the MCP server at `/ado-mcp-proxy` (verified in the lab). This is the fix.
 - [RFC 9728 section 3.3](https://datatracker.ietf.org/doc/html/rfc9728#section-3.3): the
   `resource` in the metadata must be identical to the resource identifier used to build the
   metadata URL. VS Code enforces this and rejects metadata for another URL.
@@ -734,26 +614,28 @@ without `<org>`) directly from APIM with a PRM document computed from the reques
   [RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707) `resource` parameter. If the
   authorization server were Entra, Entra would receive the gateway URL and fail with
   `AADSTS9010010`. Naming the **gateway** as authorization server sends the client to
-  APIM's `/authorize` and `/token`, which translate the resource first.
-- The URL follows RFC 9728 path insertion (`/.well-known/oauth-protected-resource` + resource
-  path). Clients that ignore the challenge and probe the well-known URL themselves (OpenAI
-  Codex does) land on the same operation.
+  APIM's `authorize` and `token`, which translate the resource first. The issuer has a
+  path (`/ado-mcp-proxy/oauth`), so the gateway root stays free for other APIs.
+- The alias follows RFC 9728 path insertion (`/.well-known/oauth-protected-resource` +
+  resource path). Clients that ignore the challenge and probe the well-known URL themselves
+  (OpenAI Codex does) land there. The alias API's path ends in `/ado-mcp-proxy`, so it
+  answers only for this setup.
 - [CLIENTS-APIM-CHANGES.md](CLIENTS-APIM-CHANGES.md) lists how each client fetches the PRM.
 
 ### Step by step
 
 1. `<base />` runs the API-level CORS policy.
-2. **Fragment `mcp-org-validation`** (the same one the proxy includes, without
+2. **Fragment `mcp-org-validation`** (the same one the MCP server policy includes, without
    `org-404-body`): sets `org` from the `{org}` template parameter (empty for the variant
    without it) and answers an empty `404` for an organization that fails the regular
    expression or `{{mcp-allowed-organizations}}`. APIM never advertises metadata for an
-   organization the proxy would reject.
+   organization the MCP server policy would reject.
 3. **`<trace>` step `prm`** with the organization.
 4. **`<return-response>`** `200`:
-   - `resource` = request scheme + host + the path after
-     `/.well-known/oauth-protected-resource` (trailing slash removed). The host comes from
-     the request, so custom domains work.
-   - `authorization_servers` = `[ scheme + host ]`.
+   - `resource` = request scheme + host + `/` + `PROXY_PATH` (+ `/` + organization when the
+     URL has one). Both URL shapes (challenge URL and alias) give the same document. The
+     host comes from the request, so custom domains work.
+   - `authorization_servers` = `[ scheme + host + "/" + OAUTH_PATH ]`.
    - `bearer_methods_supported` = `["header"]`, `scopes_supported` = `[SCOPE]`,
      `resource_name` for display.
    - `Access-Control-Allow-Origin: *` so browser clients can read it; `Cache-Control: no-store`
@@ -763,20 +645,20 @@ No backend is called, so `<backend>` and `<outbound>` do not run.
 
 ### What breaks without it
 
-The URL in the proxy's challenge would return `404` and clients would stop discovery
-(*"failed to fetch protected resource metadata"*). Pointing the challenge at the origin's
-PRM instead brings back the `resource` mismatch, and pointing `authorization_servers` at
-Entra brings back `AADSTS9010010`.
+The URL in the MCP server's challenge would be answered by APIM's built-in metadata, which
+names Entra as authorization server. Sign-in then fails exactly as on the regular setup:
+`AADSTS9010010`, or *"does not support dynamic client registration"* for DCR clients.
+Without the alias, OpenAI Codex (which ignores the challenge) finds no PRM.
 
 ### Sample request and response
 
 ```json
-GET https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>
+GET https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>
 
 200 OK
 {
   "resource": "https://<gateway>/ado-mcp-proxy/<org>",
-  "authorization_servers": [ "https://<gateway>" ],
+  "authorization_servers": [ "https://<gateway>/ado-mcp-proxy/oauth" ],
   "bearer_methods_supported": [ "header" ],
   "scopes_supported": [ "https://mcp.dev.azure.com/.default" ],
   "resource_name": "Azure DevOps MCP via API Management"
@@ -786,8 +668,9 @@ GET https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>
 ### How to verify
 
 ```powershell
-Invoke-RestMethod 'https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>' | ConvertTo-Json
-# resource = https://<gateway>/ado-mcp-proxy/<org>, authorization_servers = https://<gateway>
+Invoke-RestMethod 'https://<gateway>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>' | ConvertTo-Json
+Invoke-RestMethod 'https://<gateway>/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>' | ConvertTo-Json   # alias, same document
+# resource = https://<gateway>/ado-mcp-proxy/<org>, authorization_servers = https://<gateway>/ado-mcp-proxy/oauth
 ```
 
 Logs: step `prm` in [`policy-traces.kql`](kql/policy-traces.kql) and
@@ -799,15 +682,21 @@ Logs: step `prm` in [`policy-traces.kql`](kql/policy-traces.kql) and
 
 ### What it does
 
-Answers `GET /.well-known/oauth-authorization-server` and
-`GET /.well-known/openid-configuration` with OAuth authorization-server metadata that names
-the gateway as issuer and lists the gateway's own `/authorize`, `/token` and `/register`.
+Answers the authorization-server metadata URLs of the issuer
+`https://<gateway>/ado-mcp-proxy/oauth`: path-appended
+(`/ado-mcp-proxy/oauth/.well-known/oauth-authorization-server` and
+`/ado-mcp-proxy/oauth/.well-known/openid-configuration`) and path-inserted aliases
+(`/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth`,
+`/.well-known/openid-configuration/ado-mcp-proxy/oauth`). The document names that issuer
+and lists the gateway's own `authorize`, `token` and `register` under it.
 
 ### Why it is needed
 
-- The PRM names `https://<gateway>` as authorization server, so the client fetches this
-  document next ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414)). Some clients
-  try OpenID discovery first, so the same policy serves both paths.
+- The PRM names `https://<gateway>/ado-mcp-proxy/oauth` as authorization server, so the
+  client fetches this document next ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414)).
+  For an issuer with a path, clients try the path-inserted OAuth URL, then OpenID variants.
+  All three CLIs used the path-inserted alias in the lab; Codex and Claude Code failed when
+  it was missing, so the aliases are required.
 - [RFC 8414 section 3.3](https://datatracker.ietf.org/doc/html/rfc8414#section-3.3): the
   `issuer` must equal the identifier the client used to build the metadata URL. The policy
   derives it from the request, so it matches on the default host and on custom domains.
@@ -823,7 +712,7 @@ the gateway as issuer and lists the gateway's own `/authorize`, `/token` and `/r
 1. `<base />` runs the API-level CORS policy.
 2. **`<trace>` step `as-metadata`** with the path that was requested.
 3. **`<return-response>`** `200` with:
-   - `issuer` = request scheme + host;
+   - `issuer` = request scheme + host + `/` + `OAUTH_PATH` (`/ado-mcp-proxy/oauth`);
    - `authorization_endpoint` = `issuer/authorize`, `token_endpoint` = `issuer/token`,
      `registration_endpoint` = `issuer/register`;
    - `response_types_supported` = `["code"]`, `grant_types_supported` =
@@ -845,14 +734,14 @@ support dynamic client registration"*.
 ### Sample request and response
 
 ```json
-GET https://<gateway>/.well-known/oauth-authorization-server
+GET https://<gateway>/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth
 
 200 OK
 {
-  "issuer": "https://<gateway>",
-  "authorization_endpoint": "https://<gateway>/authorize",
-  "token_endpoint": "https://<gateway>/token",
-  "registration_endpoint": "https://<gateway>/register",
+  "issuer": "https://<gateway>/ado-mcp-proxy/oauth",
+  "authorization_endpoint": "https://<gateway>/ado-mcp-proxy/oauth/authorize",
+  "token_endpoint": "https://<gateway>/ado-mcp-proxy/oauth/token",
+  "registration_endpoint": "https://<gateway>/ado-mcp-proxy/oauth/register",
   "response_types_supported": [ "code" ],
   "grant_types_supported": [ "authorization_code", "refresh_token" ],
   "code_challenge_methods_supported": [ "S256" ],
@@ -864,8 +753,8 @@ GET https://<gateway>/.well-known/oauth-authorization-server
 ### How to verify
 
 ```powershell
-Invoke-RestMethod 'https://<gateway>/.well-known/oauth-authorization-server' | ConvertTo-Json
-Invoke-RestMethod 'https://<gateway>/.well-known/openid-configuration' | ConvertTo-Json   # same document
+Invoke-RestMethod 'https://<gateway>/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth' | ConvertTo-Json
+Invoke-RestMethod 'https://<gateway>/ado-mcp-proxy/oauth/.well-known/openid-configuration' | ConvertTo-Json   # same document
 ```
 
 Logs: step `as-metadata` in [`policy-traces.kql`](kql/policy-traces.kql) and
@@ -928,7 +817,7 @@ later fails with `AADSTS50011` (redirect URI mismatch).
 ### Sample request and response
 
 ```http
-POST https://<gateway>/register
+POST https://<gateway>/ado-mcp-proxy/oauth/register
 Content-Type: application/json
 
 {"client_name":"Claude Code","redirect_uris":["http://localhost:<port>/callback"],
@@ -953,7 +842,7 @@ Cache-Control: no-store
 ### How to verify
 
 ```powershell
-Invoke-RestMethod 'https://<gateway>/register' -Method Post -ContentType application/json `
+Invoke-RestMethod 'https://<gateway>/ado-mcp-proxy/oauth/register' -Method Post -ContentType application/json `
   -Body '{"client_name":"policy-test","redirect_uris":["http://127.0.0.1:12345/"]}' | ConvertTo-Json
 # client_id = <public-client-id>, redirect_uris echoed, token_endpoint_auth_method = none
 ```
@@ -1019,7 +908,7 @@ doesn't match with the requested scopes.` No sign-in page is shown.
 ### Sample request and response
 
 ```http
-GET https://<gateway>/authorize?client_id=<public-client-id>&response_type=code
+GET https://<gateway>/ado-mcp-proxy/oauth/authorize?client_id=<public-client-id>&response_type=code
     &redirect_uri=http%3A%2F%2F127.0.0.1%3A33418%2F&state=<state>
     &code_challenge=<challenge>&code_challenge_method=S256
     &scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
@@ -1039,12 +928,12 @@ $gw = 'https://<gateway>'
 $q = 'client_id=<public-client-id>&response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A33418%2F&state=x' +
      '&code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM&code_challenge_method=S256' +
      '&resource=' + [uri]::EscapeDataString("$gw/ado-mcp-proxy/<org>")
-$r = Invoke-WebRequest "$gw/authorize?$q" -MaximumRedirection 0 -SkipHttpErrorCheck -ErrorAction SilentlyContinue
+$r = Invoke-WebRequest "$gw/ado-mcp-proxy/oauth/authorize?$q" -MaximumRedirection 0 -SkipHttpErrorCheck -ErrorAction SilentlyContinue
 $r.StatusCode                 # 302
 $r.Headers.Location           # ...&scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default&resource=https%3A%2F%2Fmcp.dev.azure.com
 
 # Without PKCE: 400 invalid_request
-(Invoke-WebRequest "$gw/authorize?client_id=<public-client-id>&response_type=code" -SkipHttpErrorCheck).StatusCode
+(Invoke-WebRequest "$gw/ado-mcp-proxy/oauth/authorize?client_id=<public-client-id>&response_type=code" -SkipHttpErrorCheck).StatusCode
 ```
 
 Open the `Location` URL in a browser: Entra shows the sign-in page instead of
@@ -1119,7 +1008,7 @@ same way, so users would have to sign in again whenever the access token expires
 ### Sample request and response
 
 ```http
-POST https://<gateway>/token
+POST https://<gateway>/ado-mcp-proxy/oauth/token
 Content-Type: application/x-www-form-urlencoded
 
 grant_type=authorization_code&client_id=<public-client-id>&code=<code>&code_verifier=<verifier>
@@ -1156,14 +1045,14 @@ A complete exchange needs a real code (run the probe or a client, see
 $gw = 'https://<gateway>'
 $form = 'grant_type=authorization_code&client_id=<public-client-id>&code=invalid&code_verifier=x' +
         '&redirect_uri=http%3A%2F%2F127.0.0.1%3A33418%2F&resource=' + [uri]::EscapeDataString("$gw/ado-mcp-proxy/<org>")
-$r = Invoke-WebRequest "$gw/token" -Method Post -ContentType 'application/x-www-form-urlencoded' -Body $form -SkipHttpErrorCheck
+$r = Invoke-WebRequest "$gw/ado-mcp-proxy/oauth/token" -Method Post -ContentType 'application/x-www-form-urlencoded' -Body $form -SkipHttpErrorCheck
 $r.StatusCode; $r.Content
 # 400 with an Entra error JSON (for example invalid_grant for the fake code), not invalid_target / AADSTS9010010
 ```
 
 Logs: steps `token` and `token-response` in [`client-signins.kql`](kql/client-signins.kql)
 (per client, by `User-Agent`) and [`policy-traces.kql`](kql/policy-traces.kql). The next
-proxy call shows the token's client app ID (`clientAppId`) in `proxy-inbound`, which proves
+MCP call shows the token's client app ID (`clientAppId`) in `proxy-inbound`, which proves
 the client really uses the pre-registered public client.
 
 ---
@@ -1171,21 +1060,21 @@ the client really uses the pre-registered public client.
 ## Shared fragments
 
 Each fragment lives in `infra/policies/fragments/` and is deployed by
-`infra/modules/policy-fragments.bicep` (except `mcp-tool-validation`, deployed with its
-schemas by `mcp-tool-validation.bicep`). A fragment talks to the policy that includes it
+`infra/modules/policy-fragments.bicep`. A fragment talks to the policy that includes it
 only through **context variables** (inputs set before the include, outputs set inside it),
 and to the operator through **named values**.
 
 ### `mcp-org-validation` (`org-validation.xml`)
 
 - **Purpose:** read the organization from the URL and reject a malformed or not allowed one.
-- **Inputs:** URL template parameter `{org}`; variable `org-404-body` (`json` for the
-  `{"error":"unknown_organization"}` body, unset for an empty `404`); named value
-  `mcp-allowed-organizations`.
+- **Inputs:** URL template parameter `{org}` (PRM operations), or, on the MCP server (no
+  operations, no template), the path after the API path (`context.Api.Path`); variable
+  `org-404-body` (`json` for the `{"error":"unknown_organization"}` body, unset for an empty
+  `404`); named value `mcp-allowed-organizations`.
 - **Outputs:** variables `org` (string, empty on the bare endpoint) and `org-rejected`
   (bool); a `404` response when rejected.
 - **Used by:** `proxy-mcp.xml` (with `org-404-body = json`), `oauth-prm.xml` (empty 404).
-- **Why a fragment:** the proxy and its metadata must accept exactly the same
+- **Why a fragment:** the MCP server and its metadata must accept exactly the same
   organizations; two copies could drift. The allow-list is now a named value an operator can
   change without redeploying.
 
@@ -1220,12 +1109,6 @@ and to the operator through **named values**.
   built with `<return-response>` (metadata, errors) still set their own headers, because a
   fragment cannot be included inside `<return-response>`.
 
-### `mcp-tool-validation` (`tool-validation.xml`)
-
-See [section 2a](#2a-tool-validationxml-tool-argument-validation-fragment) and
-[TOOL-VALIDATION.md](TOOL-VALIDATION.md). It is the only fragment with Bicep placeholders,
-because its `choose` branches are generated from the list of vetted tools.
-
 ### Rules for fragments
 
 - No `<base />` and no section tags inside a fragment; the root is `<fragment>`.
@@ -1242,8 +1125,9 @@ because its `choose` branches are generated from the list of vetted tools.
 2. XML comments must not contain two hyphens in a row, and must not contain placeholder
    tokens with their underscores (Bicep would replace them). Never put comments inside
    attribute values, policy expressions or `<set-body>` text.
-3. Never read `context.Response.Body` in `proxy-mcp.xml` or `native-mcp.xml`, and keep
-   `buffer-response="false"`.
+3. Never read `context.Response.Body` in `proxy-mcp.xml` or `native-mcp.xml` (it would
+   buffer the SSE stream). Do not add `validate-content` to an MCP server policy: MCP
+   servers have no operations, and every request fails with HTTP 500.
 4. Never log `Authorization`, cookies, codes, verifiers or tokens. Add a `<trace>` with a
    `step` value instead, and extend the queries in `docs/kql/`.
 5. Build and preview before deploying:

@@ -89,8 +89,8 @@ repository:
 |---|---|---|
 | `apimName` | Your APIM instance | The gateway the lab configures |
 | `adoOrganization` | Your organization name | Used for the output URLs; any allowed organization works at run time |
-| `tenantId` | `<tenant-id>` | Where `/authorize` and `/token` send users. `organizations` (several tenants) also needs a multi-tenant public client and consent in each tenant; `setup-entra.ps1` creates a single-tenant app, so this is not covered by the lab |
-| `publicClientId` | Output of step 2 | Returned by `/register`. Leave empty to deploy only the regular setup |
+| `tenantId` | `<tenant-id>` | Where the gateway's `authorize` and `token` endpoints send users. `organizations` (several tenants) also needs a multi-tenant public client and consent in each tenant; `setup-entra.ps1` creates a single-tenant app, so this is not covered by the lab |
+| `publicClientId` | Output of step 2 | Returned by the gateway's `register` endpoint. Leave empty to deploy only the regular setup |
 | `allowedOrganizations` | `['<org>']` | Only these organizations are accepted on the proxy; `[]` accepts any well-formed name |
 | `createApim` | `false` (or `true` plus `publisherEmail`) | Creating a Developer-tier instance takes 30–45 minutes |
 
@@ -107,9 +107,8 @@ Other parameters (defaults are fine for a first run):
 | `toolsets` | `''` | Both setups: `X-MCP-Toolsets`, for example `repos,wit` |
 | `rateLimitCalls` / `rateLimitPeriod` | `60` / `60` | Working setup: per-IP rate limit |
 | `mcpRequestBodyBytes` | `4096` | JSON-RPC **request** bytes logged for MCP APIs (0 disables). Response bodies are never logged |
-| `toolValidation` | `true` | Working setup: validate `tools/call` arguments of vetted tools ([TOOL-VALIDATION.md](TOOL-VALIDATION.md)) |
-| `unlistedToolAction` | `allow` | `deny` rejects tools that have no gateway schema |
-| `toolValidationDebug` | `false` | Lab only: echo raw validation errors, which can contain submitted values |
+| `proxyApiPath` | `ado-mcp-proxy` | Working setup's **dedicated path** and MCP server name. The MCP URL, its PRM (`/<path>/.well-known/oauth-protected-resource/...`), its OAuth endpoints (`/<path>/oauth/...`) and its metadata all live under it; nothing is mounted at the gateway root ([Isolation](../README.md#isolation-the-working-setup-owns-one-dedicated-path)) |
+| `rootDiscoveryAliases` | `true` | Path-inserted `/.well-known/.../<path>` aliases of the metadata. Keep on: Codex and Claude Code fail without them |
 
 ## 4. Validate, preview, deploy
 
@@ -124,8 +123,10 @@ az deployment group create  -g <rg> --parameters infra/main.local.bicepparam --q
 
 **Why:** `build` catches template errors locally. `what-if` shows exactly what will be
 created or changed in APIM, and it changes nothing. `create` deploys: the Log Analytics
-workspace, Application Insights, APIM loggers and diagnostics, the backend, the three APIs,
-their policies, the tool schemas and the validation fragment.
+workspace, Application Insights, APIM loggers and diagnostics, the backend, the policy
+fragments and named values, the two MCP servers (`ado-mcp-native`, `ado-mcp-proxy`), the
+working setup's five plain APIs (PRM, OAuth and three discovery aliases), and all their
+policies. Tool argument validation is not deployed ([TOOL-VALIDATION.md](TOOL-VALIDATION.md)).
 
 **Expected** (`create`, after 2–5 minutes on an existing instance; abridged, the real output also
 shows `"type"` for each value):
@@ -134,14 +135,18 @@ shows `"type"` for each value):
 {
   "nativeMcpUrl":  { "value": "https://<apim-name>.azure-api.net/ado-mcp-native/<org>" },
   "proxyMcpUrl":   { "value": "https://<apim-name>.azure-api.net/ado-mcp-proxy/<org>" },
+  "proxyOAuthIssuer": { "value": "https://<apim-name>.azure-api.net/ado-mcp-proxy/oauth" },
+  "proxyApiNames": { "value": [ "ado-mcp-proxy", "ado-mcp-proxy-prm", "ado-mcp-proxy-oauth",
+                                "ado-mcp-proxy-discovery-prm", "ado-mcp-proxy-discovery-as",
+                                "ado-mcp-proxy-discovery-oidc" ] },
   "originUrl":     { "value": "https://mcp.dev.azure.com/<org>" },
   "appInsightsName": { "value": "appi-<apim-name>" },
-  "workspaceId":   { "value": "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/log-<apim-name>" },
-  "validatedTools": { "value": [ "core_list_projects", "wit_work_item" ] }
+  "workspaceId":   { "value": "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/log-<apim-name>" }
 }
 ```
 
-If ARM answers `502` or a conflict, rerun `create`; deployments are idempotent.
+If ARM answers `502`, a conflict or `PreconditionFailed` (parallel writes to one API), rerun
+`create`; deployments are idempotent.
 
 From here on, **`<gateway>`** means the host of `nativeMcpUrl` (`https://<apim-name>.azure-api.net`,
 or your custom domain), and the Log Analytics workspace name is `log-<apim-name>`. Note that
@@ -168,7 +173,8 @@ Before running, edit `tools/probe.local.json` (git-ignored):
 **Why:** the probe checks both setups and the origin the same way, without a person in the
 loop. It runs discovery, emulates a client's sign-in up to Entra (and reports any `AADSTS`
 code), then calls `initialize`, `tools/list` and `tools/call` with an Azure CLI token, and
-finally the tool-validation cases. `--token az` uses
+finally the validation cases. Those only record what the server does with invalid input
+(`INFO`), because no gateway validation is deployed. `--token az` uses
 `az account get-access-token --scope https://mcp.dev.azure.com/.default`, which works once
 step 2 has created the service principal.
 
@@ -181,8 +187,9 @@ XFAIL  apim-native      client: Entra authorize request: invalid_target AADSTS90
 PASS   apim-native      mcp: tools/call core_list_projects: isError=False [...]
 PASS   apim-proxy       discovery: GET without token is not 5xx: HTTP 405
 PASS   apim-proxy       client: Entra authorize request: sign-in page served (via gateway redirect); resource=https://mcp.dev.azure.com
+PASS   apim-proxy       client: OAuth endpoints under the MCP path (isolation): 4 endpoints under /ado-mcp-proxy/
 PASS   apim-proxy       mcp: tools/call core_list_projects: isError=False [...]
-PASS   apim-proxy       validation: core_list_projects top out of range: gateway JSON-RPC error -32602 [top:maximum]
+INFO   apim-proxy       validation: core_list_projects top out of range: not validated at the gateway; server answered server result: [...]
 INFO   apim-native      validation: core_list_projects top out of range: not validated at the gateway; server answered server result: [...]
 ... checks, 2 expected failures, 0 unexpected
 ```
@@ -227,8 +234,10 @@ forwarding. One deployment therefore serves any number of organizations:
 | `https://<gateway>/ado-mcp-native/<org>` | `https://mcp.dev.azure.com/<org>` | Regular setup |
 
 In the working setup, each per-organization URL gets its own protected-resource metadata
-(`/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>`) whose `resource` equals that
-URL. All organizations share one authorization facade, because the token audience is the
+(`/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>`, alias
+`/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>`) whose `resource` equals that
+URL. All organizations share one authorization facade (`/ado-mcp-proxy/oauth`), because the
+token audience is the
 same (`https://mcp.dev.azure.com`). Organization names are validated
 (`^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$`) and checked against `allowedOrganizations`. Anything
 else returns `404` before reaching Azure DevOps. Organizations in **different Entra tenants**
@@ -249,8 +258,67 @@ PRM path it advertises:
 `docs/kql/backend-url-mapping.kql` shows the effective `BackendUrl` per request. The portal
 shows only the API base URL. **Clients must append `/<org>`.**
 
+## Upgrading from an earlier version
+
+Earlier versions of this lab differed in two ways. Client URLs did not change in either.
+
+| Earlier version | Current version |
+|---|---|
+| OAuth endpoints at the gateway root: API `ado-mcp-oauth-compat`, path `/` (`/authorize`, `/token`, `/register`, `/.well-known/oauth-authorization-server`, ...) | Under `/ado-mcp-proxy/oauth`, so other APIs on the instance are not affected |
+| Working setup as a plain HTTP API proxy `ado-mcp-proxy` with operations, a challenge rewrite and tool argument validation | An APIM MCP server `ado-mcp-proxy` plus the PRM API `ado-mcp-proxy-prm`; no validation |
+
+Bicep deploys incrementally: it neither deletes old resources nor changes an API's type.
+
+1. **If `ado-mcp-proxy` is still an HTTP API**, delete it before deploying. Its type cannot
+   change from HTTP to MCP. Clients get errors until the deployment has recreated it.
+
+   ```powershell
+   az apim api show -g <rg> -n <apim-name> --api-id ado-mcp-proxy --query type -o tsv   # "http" = old version
+   az apim api delete -g <rg> -n <apim-name> --api-id ado-mcp-proxy --yes
+   ```
+
+2. Deploy as in step 4.
+3. Remove what the earlier versions left behind (skip what does not exist):
+
+   ```powershell
+   az apim api delete -g <rg> -n <apim-name> --api-id ado-mcp-oauth-compat --yes
+   az apim api operation delete -g <rg> -n <apim-name> --api-id ado-mcp-proxy-oauth --operation-id protected-resource-metadata
+   az apim api operation delete -g <rg> -n <apim-name> --api-id ado-mcp-proxy-oauth --operation-id protected-resource-metadata-org
+   ```
+
+   Then delete, in the portal or with `az rest`, the policy fragment `mcp-tool-validation`
+   (APIM → *APIs → Policy fragments*) and the schemas `mcp-tool-core-list-projects` and
+   `mcp-tool-wit-work-item` (APIM → *APIs → Schemas*). Nothing references them any more.
+
+4. Check that nothing of the working setup answers at the root any more:
+
+   ```powershell
+   foreach ($p in '/authorize','/token','/register','/.well-known/oauth-authorization-server') {
+     "{0} {1}" -f (curl.exe -s -o NUL -w "%{http_code}" "https://<gateway>$p"), $p }   # all 404
+   python tools/mcp_probe.py --config tools/probe.local.json --token az            # isolation check PASS
+   ```
+
+   In `tools/probe.local.json`, set `"toolValidation": "none"` on the `apim-proxy` target, as
+   in `probe.example.json`. With `"enforced"` the invalid validation cases fail.
+
+5. **Make clients forget the old issuer.** Clients cache the authorization server they
+   discovered. Observed in the lab: Claude Code reused its cached issuer and sent the
+   browser to the removed root `/authorize` (`404`) until it was signed out.
+
+   | Client | Reset |
+   |---|---|
+   | Claude Code | `claude mcp logout <name>`, then `claude mcp login <name>` |
+   | OpenAI Codex CLI | `codex mcp logout <name>`, then `codex mcp login <name>` |
+   | GitHub Copilot CLI | Rediscovered the new issuer by itself in the lab: `/mcp` → select the server → sign in. If it keeps the old one, delete its entry in the OS credential store (`copilot-mcp-oauth`) |
+   | VS Code | **MCP: Reset Cached Tools**, **Accounts: Sign Out** for the dynamic provider, reload the window |
+
+   Access tokens keep working until they expire (the token audience did not change); only
+   the next sign-in or refresh uses the new endpoints.
+
 ## Clean up
 
-Delete the lab resource group (or, with an existing APIM, the three APIs, the schemas, the
-policy fragment, the loggers and diagnostics this lab added). APIM Developer tier is billed
+Delete the lab resource group. With an existing APIM, delete instead what this lab added: the
+two MCP servers (`ado-mcp-native`, `ado-mcp-proxy`), the five plain APIs of the working
+setup (the other names in the `proxyApiNames` output), the backend `ado-mcp-origin`, the
+policy fragments, the named values, and the loggers and diagnostics. APIM Developer tier is billed
 per hour while it exists. Remove the public client app registration if you no longer need it.

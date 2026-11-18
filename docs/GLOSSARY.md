@@ -36,8 +36,9 @@ logs `azp` and `oid`, never the token itself.
 
 ### API Management (APIM) terms
 
-- **API**: a set of operations under one path (`/ado-mcp-proxy`). An **MCP API** (native
-  pass-through) is a special API type that forwards MCP traffic and has no operations.
+- **API**: a set of operations under one path (`/ado-mcp-proxy/oauth`). An **MCP server**
+  (MCP API, native pass-through) is a special API type that forwards MCP traffic and has no
+  operations. APIM lists them under *APIs → MCP servers*; both setups of this lab use one.
 - **Operation**: one method and URL template inside an API (`POST /{org}`).
 - **Backend**: the upstream service (`https://mcp.dev.azure.com`).
 - **Policy**: XML that runs per request in four sections: `inbound` (before the backend),
@@ -46,7 +47,8 @@ logs `azp` and `oid`, never the token itself.
 - **Policy expression**: C# inside `@( … )` (one expression) or `@{ … }` (a block with
   `return`). [Expressions](https://learn.microsoft.com/azure/api-management/api-management-policy-expressions).
 - **Policy fragment**: reusable policy XML included with `<include-fragment>`.
-- **Schema**: a JSON schema stored in APIM and used by `validate-content`.
+- **Schema**: a JSON schema stored in APIM and used by `validate-content` (not deployed by
+  this lab; see [TOOL-VALIDATION.md](TOOL-VALIDATION.md)).
 - **`<trace>`**: a policy that writes a custom event to Application Insights `traces`.
 
 ### Authorization server, authorization-server metadata (RFC 8414)
@@ -171,6 +173,6 @@ and runs. The gateway sets them, so users cannot remove them.
 
 ### Working setup
 
-This repository's fix: an APIM HTTP API proxy plus OAuth compatibility endpoints, so
-clients sign in through the gateway with their own identity. See
+This repository's fix: an APIM MCP server plus plain APIs for PRM and OAuth compatibility,
+all under one dedicated path, so clients sign in through the gateway with their own identity. See
 [CLIENTS-APIM-CHANGES.md](CLIENTS-APIM-CHANGES.md) and [POLICIES.md](POLICIES.md).

@@ -3,7 +3,8 @@
   PURPOSE  : Reads the Azure DevOps organization from the URL and rejects a
              malformed or not allowed one with 404 before anything else runs.
   USED BY  : proxy-mcp.xml (inbound) and oauth-prm.xml (inbound).
-  INPUT    : URL template parameter {org} (absent on the bare endpoints).
+  INPUT    : URL template parameter {org}, or the path after the API path on
+             the MCP server (absent on the bare endpoints).
              Variable org-404-body (optional): "json" answers 404 with
              {"error":"unknown_organization"}; unset answers an empty 404.
              Named value mcp-allowed-organizations: comma-separated allow-list,
@@ -17,8 +18,17 @@
   DETAILS  : docs/POLICIES.md
 -->
 <fragment>
-  <!-- Organization from the URL template /{org}; empty on the bare endpoint. -->
-  <set-variable name="org" value="@(context.Request.MatchedParameters.GetValueOrDefault(&quot;org&quot;, &quot;&quot;))" />
+  <!-- Organization: the URL template parameter {org} (PRM operations), or, for
+       the MCP server (no operations, no template), the path after the API
+       path. Empty on the bare endpoint. A deeper path keeps its slash and fails
+       the regular expression below. -->
+  <set-variable name="org" value="@{
+    var matched = context.Request.MatchedParameters.GetValueOrDefault(&quot;org&quot;, (string)null);
+    if (matched != null) { return matched; }
+    var path = context.Request.OriginalUrl.Path;
+    var prefix = &quot;/&quot; + context.Api.Path.Trim('/');
+    return path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? path.Substring(prefix.Length).Trim('/') : &quot;&quot;;
+  }" />
   <!-- The regex blocks path tricks (dots, slashes, encoded characters); the
        named value holds the allow-list. Empty org is not rejected: the bare
        endpoint takes orgName per tool call. -->

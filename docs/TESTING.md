@@ -25,14 +25,18 @@ New to the lab? Deploy it first with [GETTING-STARTED.md](GETTING-STARTED.md). T
    body-less `GET` that must not return `5xx` (OpenAI Codex sends one before signing in).
 2. **client**: emulates an MCP client the way VS Code does it. It accepts PRM only if
    `resource` equals the server URL (RFC 9728) and falls back as VS Code does. It loads
-   authorization-server metadata, calls `/register` when offered, then sends the
+   authorization-server metadata, calls its `register` endpoint when offered, then sends the
    authorization request with `resource` + `scope` (RFC 8707). It follows one gateway
    redirect to Entra and reports any `AADSTS` code. No one signs in. For the multi-tenant
    `organizations` authority it evaluates with the configured tenant, because Entra checks
-   resource/scope only once it knows the user's tenant.
+   resource/scope only once it knows the user's tenant. When the authorization server is
+   on the gateway host, it also checks **isolation**: issuer, `authorize`, `token` and
+   `register` must all be under the MCP URL's first path segment (`/ado-mcp-proxy/...`), so
+   the working setup never claims routes at the gateway root.
 3. **mcp**: with a token, `initialize` → `notifications/initialized` → `tools/list` → `tools/call core_list_projects`.
 4. **validation**: with a token, every `validationCases` entry against targets marked
-   `toolValidation` (see section 5).
+   `toolValidation`. No target enforces validation any more, so the invalid cases print
+   `INFO` with what the server answered (see section 5).
 
 ```powershell
 Copy-Item tools/probe.example.json tools/probe.local.json
@@ -77,14 +81,20 @@ $gw  = 'https://<gateway>'
 $init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 $h = @{ Accept = 'application/json, text/event-stream' }
 
-# a) the 401 challenge: native rewrites to the gateway, proxy points at APIM-hosted metadata
-Invoke-WebRequest "$gw/ado-mcp-native/<org>" -Method Post -Body $init -ContentType application/json -Headers $h -SkipHttpErrorCheck |
-  Select-Object StatusCode, @{n='WWW-Authenticate';e={$_.Headers['WWW-Authenticate']}}
+# a) the 401 challenge: both MCP servers point at /<api>/.well-known/oauth-protected-resource/<org> (APIM built in, no scope)
+foreach ($api in 'ado-mcp-native','ado-mcp-proxy') {
+  Invoke-WebRequest "$gw/$api/<org>" -Method Post -Body $init -ContentType application/json -Headers $h -SkipHttpErrorCheck |
+    Select-Object StatusCode, @{n='WWW-Authenticate';e={$_.Headers['WWW-Authenticate']}} }
 
-# b) the PRM each setup returns
-Invoke-RestMethod "$gw/ado-mcp-native/.well-known/oauth-protected-resource/<org>" | ConvertTo-Json   # resource = gateway URL, scope = Azure DevOps
-Invoke-RestMethod "$gw/.well-known/oauth-protected-resource/ado-mcp-proxy/<org>" | ConvertTo-Json    # resource = gateway URL, AS = gateway
-Invoke-RestMethod "$gw/.well-known/oauth-authorization-server" | ConvertTo-Json                      # APIM authorization-server metadata
+# b) the PRM each setup returns at that URL
+Invoke-RestMethod "$gw/ado-mcp-native/.well-known/oauth-protected-resource/<org>" | ConvertTo-Json               # APIM built in: resource = gateway URL, AS = Entra
+Invoke-RestMethod "$gw/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>" | ConvertTo-Json                # API ado-mcp-proxy-prm: resource = gateway URL, AS = {gw}/ado-mcp-proxy/oauth
+Invoke-RestMethod "$gw/ado-mcp-proxy/oauth/.well-known/openid-configuration" | ConvertTo-Json                    # APIM authorization-server metadata
+Invoke-RestMethod "$gw/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth" | ConvertTo-Json              # same, path-inserted alias
+
+# b2) isolation: nothing of the working setup at the gateway root
+foreach ($p in '/authorize','/token','/register','/.well-known/oauth-authorization-server','/.well-known/openid-configuration') {
+  "{0} {1}" -f (Invoke-WebRequest "$gw$p" -SkipHttpErrorCheck).StatusCode, $p }                                  # all 404
 
 # c) authenticated calls
 $token = az account get-access-token --scope https://mcp.dev.azure.com/.default --query accessToken -o tsv
@@ -124,9 +134,34 @@ behave differently, and what the gateway changes for them:
 |---|---|---|
 | [VS Code](clients/vscode.md) | ✅ | ❌ `AADSTS9010010` |
 | [GitHub Copilot CLI](clients/copilot-cli.md) | ✅ | ⚠️ connects through its own Entra broker (interactive only) |
-| [OpenAI Codex CLI](clients/codex.md) | ✅ | ⚠️ connects only because the working setup's OAuth endpoints share the host |
+| [OpenAI Codex CLI](clients/codex.md) | ✅ | ❌ *Dynamic registration failed: HTTP 404* (no metadata; root `/register` does not exist) |
 | [Claude Code](clients/claude-code.md) | ✅ | ❌ no DCR, or `AADSTS9010010` with `--client-id` |
 | [MCP Inspector](clients/mcp-inspector.md) | ✅ | ❌ no DCR, or `AADSTS9010010` with a client ID |
+
+### Per-CLI test checklist
+
+Each row is self-contained and writes nothing to your normal profile. Replace `<url>` with
+`https://<gateway>/ado-mcp-proxy/<org>`. Full guides with expected output: [docs/clients](clients/README.md).
+
+| CLI | 1. Configure (scratch) | 2. Sign in | 3. Test | Pass when |
+|---|---|---|---|---|
+| GitHub Copilot CLI | `{"mcpServers":{"ado_proxy":{"type":"http","url":"<url>","tools":["*"]}}}` in `%TEMP%\ado-mcp\copilot-mcp.json` | `copilot --additional-mcp-config "@%TEMP%\ado-mcp\copilot-mcp.json"` → `/mcp` → `ado_proxy` → sign in | `copilot --additional-mcp-config "@..." --disable-builtin-mcps -p "<prompt>" --allow-tool ado_proxy` | `core_list_projects` called, project names listed |
+| OpenAI Codex CLI | `$env:CODEX_HOME="$env:TEMP\ado-mcp\codex-home"; codex mcp add ado_proxy --url <url>` | `codex mcp login ado_proxy` (`--no-browser` prints the URL) | `codex mcp list` → `Auth: OAuth`; with a model: `codex exec "<prompt>"` | `Successfully logged in`, authorize URL starts with `<gateway>/ado-mcp-proxy/oauth/authorize` |
+| Claude Code | In a scratch folder: `claude mcp add --transport http -s local ado-proxy <url>` | `claude mcp login ado-proxy` (`--no-browser` prints the URL) | `claude mcp list` | `ado-proxy: ... √ Connected` |
+| VS Code | **MCP: Open User Configuration** → `"ado-apim-proxy": {"type":"http","url":"<url>"}` | **MCP: List Servers** → start → sign in | Agent mode: *"List the Azure DevOps projects I can access."* | Projects listed |
+| MCP Inspector | `npx @modelcontextprotocol/inspector` → Streamable HTTP, `<url>` | **Connect** | **Tools → List Tools → core_list_projects** | Tool result shown |
+
+`<prompt>`: *"Use only the ado_proxy MCP server. Call core_list_projects with no arguments and
+print the project names."* Earlier versions of this checklist also asked for `top` set to 500
+and expected the gateway's validation error. That error is no longer expected: the gateway
+does not validate tool arguments, and the server accepts `top: 500`
+([TOOL-VALIDATION.md](TOOL-VALIDATION.md)). For each client, `client-signins.kql` should then show `prm`, `as-metadata`,
+`register`, `authorize`, `token` and `proxy-inbound` rows, and every OAuth request path under
+`/ado-mcp-proxy/oauth` or a `/.well-known/.../ado-mcp-proxy` alias.
+
+Re-testing after a gateway change: sign out first (`claude mcp logout`, `codex mcp logout`,
+VS Code **Accounts: Sign Out**), because clients cache the authorization server they
+discovered.
 
 ## 4. Find a request in the logs
 
@@ -141,75 +176,29 @@ python tools/query_logs.py docs/kql/gateway-by-request-id.kql @la --param x-apim
 python tools/query_logs.py docs/kql/www-authenticate-rewrite.kql @la
 python tools/query_logs.py docs/kql/backend-url-mapping.kql @la
 python tools/query_logs.py docs/kql/policy-traces.kql @la --param run-id=<run-id>   # <trace> events per step
-python tools/query_logs.py docs/kql/tool-validation.kql @la --param run-id=<run-id>  # validation decisions, backend reached?
 python tools/query_logs.py docs/kql/client-signins.kql @la --param client=codex     # one client's sign-in steps (User-Agent filter)
 ```
 
 Or paste the `.kql` files into **Application Insights → Logs** or **Log Analytics → Logs**.
-In App Insights, `OperationId` equals the probe's trace ID. Gateway calls are under **requests** (not traces). The **traces** table holds the `<trace>` policy events. See [OBSERVABILITY.md](OBSERVABILITY.md).
+In App Insights, `OperationId` equals the probe's trace ID for the probe's MCP calls (its discovery and OAuth requests are separate operations). Gateway calls are under **requests** (not traces). The **traces** table holds the `<trace>` policy events. Real MCP clients send no `traceparent`, so each of their calls is its own operation; [`session-timeline.kql`](kql/session-timeline.kql) puts one client's session back into one timeline. See [OBSERVABILITY.md](OBSERVABILITY.md).
 
-## 5. Tool argument validation (working setup)
+## 5. Tool argument validation (not deployed)
 
-The probe runs every entry in `validationCases` against targets marked
-`"toolValidation": "enforced"` (the proxy) and `"none"` (native, for comparison):
+Neither setup validates tool arguments at the gateway; see
+[TOOL-VALIDATION.md](TOOL-VALIDATION.md) for the reason and for how to add validation. The
+probe still runs `validationCases` against the targets marked `"toolValidation": "none"`
+(both setups in `probe.example.json`) and records what the server does with each case:
+
+```text
+PASS   apim-proxy   validation: core_list_projects valid: server result: [...]
+INFO   apim-proxy   validation: core_list_projects top out of range: not validated at the gateway; server answered server result: [...]
+```
+
+`INFO` lines never fail the run. Run them with:
 
 ```powershell
 python tools/mcp_probe.py --config tools/probe.local.json --token az --only apim-proxy --only apim-native
 ```
-
-| Case | Proxy (enforced) | Native (no validation) |
-|---|---|---|
-| `core_list_projects` `{"top":5}` | PASS (forwarded) | PASS |
-| `top:"5"` / `top:500` / `stateFilter:"everything"` / unknown `query` | `-32602` `[top:type]` / `[top:maximum]` / `[stateFilter:enum]` / `[query:additionalProperties]` | server **accepts** `"5"`, `500` and `query`, and reports a generic tool error for the enum |
-| `top:500` with `MCP-Protocol-Version: 2025-11-25` | `result.isError: true` | — |
-| `wit_work_item` `{"action":"my","project":…}` | PASS | PASS |
-| `{}` / `action:"delete"` / `id:"12"` / `id:0` / `get` without `id` / unknown `wiql` | `-32602` `[action:required]` / `[action:enum]` / `[id:type]` / `[id:minimum]` / `[id:required]` / `[wiql:additionalProperties]` | server runs the tool and returns `isError` texts, or **accepts** `wiql` |
-| `CORE_LIST_PROJECTS` (other case) | `-32602` `[params.name:const]` | server: unknown tool |
-| JSON-RPC batch `[{…}]` | `-32602` `[request:batch-not-allowed]` | HTTP 500 from the server |
-
-A rejected call by hand (PowerShell):
-
-```powershell
-$gw = 'https://<gateway>'; $token = az account get-access-token --scope https://mcp.dev.azure.com/.default --query accessToken -o tsv
-$h = @{ Authorization = "Bearer $token"; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-06-18' }
-$body = '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":"5","query":1}}}'
-$r = Invoke-WebRequest "$gw/ado-mcp-proxy/<org>" -Method Post -Body $body -ContentType application/json -Headers $h
-$r.Headers['x-mcp-gateway-validation']   # rejected
-$r.Content                               # {"jsonrpc":"2.0","id":11,"error":{"code":-32602,"message":"Invalid arguments for tool core_list_projects: top violates type; query violates additionalProperties. ..."}}
-
-$h['MCP-Protocol-Version'] = '2025-11-25'   # newer clients get a tool execution error instead
-(Invoke-WebRequest "$gw/ado-mcp-proxy/<org>" -Method Post -Body $body -ContentType application/json -Headers $h).Content
-# {"jsonrpc":"2.0","id":11,"result":{"content":[{"type":"text","text":"Invalid arguments for tool core_list_projects: ..."}],"isError":true}}
-```
-
-The same with curl:
-
-```bash
-curl -s https://<gateway>/ado-mcp-proxy/<org> -H "Authorization: Bearer $TOKEN" \
-  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"wit_work_item","arguments":{"action":"get","id":0}}}'
-# {"jsonrpc":"2.0","id":12,"error":{"code":-32602,"message":"Invalid arguments for tool wit_work_item: id violates minimum. ..."}}
-```
-
-In MCP Inspector (UI), call `core_list_projects` with `top` = `500` to see the gateway's
-error in the tool result pane. In VS Code, the agent receives the error text and usually
-retries with corrected arguments.
-
-**Prove the backend was never called.** After 2–5 minutes:
-
-```powershell
-python tools/query_logs.py docs/kql/tool-validation.kql -g <rg> -w log-<apim-name> --param run-id=<run-id>
-```
-
-Rejected rows show `result: rejected`, the violations (field and rule only),
-`reachedBackend: false` and an empty `BackendResponseCode`. Passed rows show
-`reachedBackend: true` and `BackendResponseCode: 200`.
-
-**Deny unvetted tools.** Redeploy with `unlistedToolAction=deny`
-(`az deployment group create … --parameters infra/main.local.bicepparam unlistedToolAction=deny`).
-`tools/call repo_repository` then returns
-`-32602 "Tool repo_repository is not allowed by the gateway policy."`, and the header reads
-`x-mcp-gateway-validation: denied`.
 
 ## Troubleshooting
 
@@ -226,9 +215,12 @@ Rejected rows show `result: rejected`, the violations (field and rule only),
 | Tool calls hang or stream arrives at once | Response buffering or body logging | Keep response body bytes at 0; never read `context.Response.Body` |
 | `Organization name is required` (bare origin) | Bare URL has no organization context | Pass `orgName` in tool arguments |
 | `404 {"error":"unknown_organization"}` (working setup) | Organization not in `allowedOrganizations`, or not a valid name | Add it to the parameter and redeploy |
-| Every request to the proxy fails with `400 Unspecified content type application/json is not allowed`, or validation never triggers | The proxy POST operation lacks an `application/json` request representation, which `validate-content` requires | Redeploy `mcp-proxy.bicep` (it declares the representation) |
-| Native MCP API returns 500 for every request after adding validation | `validate-content` cannot run on native MCP APIs (no operations) | Keep validation on the proxy only (default) |
-| A valid call is rejected with `-32602` | The curated schema is stricter than the server, or out of date | Update `infra/schemas/tools/<tool>.json` and redeploy |
-| Codex: `OAuth metadata discovery failed ... unexpected HTTP status 500` | A policy failed on Codex's body-less `GET` probe | Redeploy the current policies; the probe check `discovery: GET without token is not 5xx` must pass |
+| An MCP server returns 500 for every request after adding `validate-content` | `validate-content` needs API operations; MCP servers have none | Remove it; see [TOOL-VALIDATION.md](TOOL-VALIDATION.md) for options |
+| Codex: `OAuth metadata discovery failed ... unexpected HTTP status 500` | A policy failed on Codex's body-less `GET` probe (seen with an earlier HTTP-proxy version) | Deploy the current version; the probe check `discovery: GET without token is not 5xx` must pass (the MCP server answers `405`) |
+| Deployment fails on API `ado-mcp-proxy` after upgrading from a version with an HTTP proxy | An API's type cannot change from HTTP to MCP | Delete the old API first ([GETTING-STARTED](GETTING-STARTED.md#upgrading-from-an-earlier-version)) |
+| Sign-in through the working setup ends with `AADSTS9010010` or *does not support dynamic client registration* | The MCP server's built-in metadata answered the PRM URL: the API `ado-mcp-proxy-prm` is missing | Redeploy; `GET /ado-mcp-proxy/.well-known/oauth-protected-resource/<org>` must name `/ado-mcp-proxy/oauth` as authorization server |
 | One `400` on the first authenticated request of a session | The client offered a newer MCP protocol version; the server refused and the client fell back | Nothing to fix |
 | Copilot CLI `-p`: *Browser-based OAuth required* or *requires authentication* | Headless mode cannot start a browser sign-in | Sign in once interactively (`/mcp`) |
+| Browser opens `https://<gateway>/authorize` and gets `404` | The client cached the authorization server of an older, root-mounted lab version (seen with Claude Code) | Sign out of the server (`claude mcp logout <name>`, `codex mcp logout <name>`) and sign in again |
+| *Dynamic registration failed: HTTP 404* or *Dynamic Client Registration rejected (HTTP 404)* on the proxy | The discovery aliases are missing (`rootDiscoveryAliases = false`, or deleted); Codex and Claude Code then fall back to the gateway root | Redeploy with `rootDiscoveryAliases = true` |
+| Probe: `client: OAuth endpoints under the MCP path (isolation)` fails | The PRM or authorization-server metadata names an issuer or endpoint outside the setup's path (an old policy version is deployed) | Redeploy the current version. To detect leftover root APIs (which this check cannot see), run the root-`404` loop in [GETTING-STARTED](GETTING-STARTED.md#upgrading-from-an-earlier-version) |

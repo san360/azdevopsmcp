@@ -69,7 +69,7 @@ Assessment:
 |---|---|
 | Core idea | Sound: make Entra see an Azure DevOps identifier as `resource`, keep the user's token |
 | PRM `resource` | `https://mcp.dev.azure.com` ≠ the proxy URL. VS Code rejects that PRM (RFC 9728) and **falls back** to treating the server origin as the authorization server. That works only because the facade sits on the root path and `/authorize` adds `resource` when missing. It is fragile against client changes |
-| This repo's change | PRM `resource` = proxy URL, so VS Code accepts it first time. `/authorize` and `/token` **replace** any client `resource` with `https://mcp.dev.azure.com`, so both the PRM path and the fallback path work. `/register` echoes the client's redirect URIs |
+| This repo's change | PRM `resource` = the client URL, so VS Code accepts it first time. `/authorize` and `/token` **replace** any client `resource` with `https://mcp.dev.azure.com`, so both the PRM path and the fallback path work. `/register` echoes the client's redirect URIs. The data plane uses APIM's native MCP server instead of an HTTP API proxy; a plain API answers the PRM URL that the MCP server advertises, and every route lives under one dedicated path |
 | Organizations | The reference fixes one organization in the API `serviceUrl`. This repo uses a bare backend with `/<org>` in the client URL, per-URL PRM, an allow-list and name validation. One deployment serves many organizations, and `tenantId = organizations` is the route to several tenants (needs a multi-tenant public client; not tested in the lab) |
 | Native experiment | Configured `mcpProperties.endpoints` as an object with `uriTemplate: /<org>`. APIM ignored it and forwarded to `https://mcp.dev.azure.com/mcp`, so Azure DevOps treated `mcp` as the organization and `tools/call` failed with `VS30063`. Its conclusion that "native MCP does not preserve the delegated token" is not supported. In this lab the token is preserved, and the failure was the backend path. The real native limitation is sign-in (finding 2) |
 | Observability | App Insights only, verbosity `error`, no headers. This repo adds Log Analytics resource tables (`ApiManagementGatewayLogs`, `ApiManagementGatewayMCPLog`), a safe header allow-list and request IDs, which is how findings 1 and 8 were proven |
@@ -81,7 +81,7 @@ Assessment:
 |---|---|---|---|
 | Direct to `https://mcp.dev.azure.com` (bare) | Yes | Yes | No gateway governance. Pass the organization per tool call |
 | **Native APIM MCP pass-through** (regular setup) | Yes (data plane) | **No**, sign-in fails `AADSTS9010010` | MCP-aware logs and tool views. PRM rewrite not configurable |
-| **HTTP proxy + OAuth compatibility** (working setup) | **Yes** | **Yes** | Custom policies on the root path. Shared public client ID. No `ApiManagementGatewayMCPLog` (not an MCP-type API) |
+| **APIM MCP server + PRM/OAuth compatibility APIs** (working setup) | **Yes** | **Yes** | Custom OAuth policies under the setup's own path. Shared public client ID. Same API type as the regular setup |
 | APIM-owned Entra resource + OBO exchange | Yes (OBO) | Yes, if the client is pre-authorized | Needs an app with an identifier URI equal to the gateway URL (verified custom domain) and a confidential client. APIM has no native OBO policy, so it needs `send-request` to Entra and token caching |
 | Credential Manager, managed connection | **No**, one shared identity | Yes (with any inbound auth) | Documented pattern in [Secure access to MCP servers](https://learn.microsoft.com/azure/api-management/secure-mcp-servers). Loses user attribution |
 | Credential Manager, user-delegated connections | Partly | No | [`get-authorization-context identity-type="jwt"`](https://learn.microsoft.com/azure/api-management/get-authorization-context-policy) needs a token for audience `https://azure-api.net/authorization-manager` and a per-user consent link. Standard MCP clients cannot do this. Limits: [credentials overview](https://learn.microsoft.com/azure/api-management/credentials-overview) |
@@ -96,25 +96,27 @@ pass-through for clients that can be given a token another way, and re-test it w
 documents a way to preserve or configure upstream PRM. Do not use Credential Manager if user
 attribution is required.
 
-**Tool-schema validation (implemented, working setup only).** APIM has no built-in
-*dynamic* validation of `tools/call` arguments against `tools/list` schemas. Static
-validation does work: this repo stores a curated JSON schema per vetted tool as an APIM
-schema resource. A policy fragment on the HTTP proxy selects the schema by `params.name` and
-runs `validate-content` in `detect` mode. It then answers with a JSON-RPC `-32602` (or
-`isError` for protocol `2025-11-25`), naming only the field and the violated rule, and never
-forwards the call. Lab findings:
+**Tool-schema validation (possible as an optional add-on, not deployed).** APIM has no
+built-in *dynamic* validation of `tools/call` arguments against `tools/list` schemas. Static
+validation works on an HTTP API: an earlier version of this repo stored a curated JSON schema
+per vetted tool as an APIM schema resource, selected it by `params.name` and ran
+`validate-content` in `detect` mode. It answered with a JSON-RPC `-32602` (or `isError` for
+protocol `2025-11-25`), naming only the field and the violated rule, and never forwarded the
+call. Lab findings:
 - The hosted server itself **accepts** wrongly typed (`top: "5"`), out-of-range (`top: 500`)
-  and unknown arguments (`query`, `wiql`), so the gateway check adds real control.
+  and unknown arguments (`query`, `wiql`), so a gateway check adds real control.
 - `validate-content` only checks content types that the operation declares as request
   representations.
-- On native MCP APIs, which have no operations, the policy makes every request fail with
-  500. Validation is therefore not possible on the regular setup today.
+- On MCP servers, which have no operations, the policy makes every request fail with 500.
+  Both setups are now MCP servers, so the lab deploys no validation.
 - `validate-content` writes its raw message, which can include submitted values, to App
   Insights exceptions.
 - Response validation is out of scope, because reading response bodies breaks streaming.
 
-Complements: server-side restrictions (`X-MCP-Readonly`, `X-MCP-Toolsets`, `X-MCP-Tools`),
-or a validation service behind APIM for dynamic schemas. Details are in [TOOL-VALIDATION.md](TOOL-VALIDATION.md).
+Options: an HTTP API in front with `validate-content` (the earlier implementation),
+hand-written policy-expression checks in the MCP server policy, server-side restrictions
+(`X-MCP-Readonly`, `X-MCP-Toolsets`, `X-MCP-Tools`), or a validation service behind APIM for
+dynamic schemas. Details are in [TOOL-VALIDATION.md](TOOL-VALIDATION.md).
 
 ## 5. Facts about the hosted Azure DevOps MCP server
 
@@ -136,19 +138,22 @@ and [clients/](clients/README.md).
   `http://127.0.0.1:<port>/callback/<id per MCP URL>`, Claude Code `http://localhost:<port>/callback`.
   Entra ignored the port for both `localhost` and `127.0.0.1` registrations. Codex needs one
   registration per MCP URL.
-- **Codex probes with a body-less `GET`** before discovery. A policy that read the missing
-  body returned `500`, and Codex aborted (*OAuth metadata discovery failed*). Fixed with a
-  null-body guard; the probe now checks it.
+- **Codex probes with a body-less `GET`** before discovery. On the earlier HTTP-proxy
+  version, a policy that read the missing body returned `500`, and Codex aborted (*OAuth
+  metadata discovery failed*). The MCP server now answers `405` natively; the probe checks it.
 - **Native pass-through:** Claude Code fails as expected (no DCR, or `AADSTS9010010` with a
   client ID). Copilot CLI connects through its built-in Entra account broker, a client
-  capability independent of the gateway (interactive only). Codex connects only because it
-  falls back to authorization-server metadata at the host root, which the working setup
-  serves on the same gateway. These do not change the root cause: any client that sends the
+  capability independent of the gateway (interactive only). Codex connected only while the
+  working setup served its OAuth endpoints at the gateway root: it falls back to the host
+  root and borrowed them. Since the working setup moved under its own path
+  (`/ado-mcp-proxy/oauth`), Codex fails on the native URL too (`POST /register` `404`).
+  These do not change the root cause: any client that sends the
   gateway URL as `resource` to Entra fails.
 - **Version negotiation:** Copilot CLI and Claude Code first offer MCP `2026-07-28`. The server
   answers `400`, and both fall back. The native API turned one such `400` into
-  `500 ProtocolViolation: Content length mismatch`; the proxy passed it through unchanged.
-- **Tool validation:** Copilot CLI and Codex surfaced the gateway's `-32602` message to the
+  `500 ProtocolViolation: Content length mismatch`; the earlier HTTP proxy passed it through
+  unchanged.
+- **Tool validation (earlier HTTP-proxy version):** Copilot CLI and Codex surfaced the gateway's `-32602` message to the
   model verbatim.
 
 ## 7. Open questions for the product groups
