@@ -1,0 +1,30 @@
+{
+  "$comment": "Gateway schema for the 'arguments' of tools/call wit_work_item (hosted Azure DevOps MCP, read-only actions). Curated from tools/list; adds types, ranges, enums, per-action required fields and no unknown properties.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["action"],
+  "properties": {
+    "action": { "type": "string", "enum": ["get", "get_batch", "list_comments", "my", "list_revisions", "list_for_iteration", "get_type"] },
+    "project": { "type": ["string", "null"], "minLength": 1, "maxLength": 64, "pattern": "^[^\\\\/:*?\"<>|;#$+=,&%@\\[\\]]+$" },
+    "id": { "type": ["integer", "null"], "minimum": 1, "maximum": 2147483647 },
+    "ids": { "type": ["array", "null"], "minItems": 1, "maxItems": 200, "items": { "type": "integer", "minimum": 1, "maximum": 2147483647 } },
+    "workItemId": { "type": ["integer", "null"], "minimum": 1, "maximum": 2147483647 },
+    "fields": { "type": ["array", "null"], "maxItems": 100, "items": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9_.]+$" } },
+    "asOf": { "type": ["string", "null"], "maxLength": 40, "pattern": "^\\d{4}-\\d{2}-\\d{2}([T ][0-9:.]+(Z|[+-]\\d{2}:?\\d{2})?)?$" },
+    "expand": { "enum": [null, "all", "fields", "links", "none", "relations", "All", "Fields", "Links", "None", "Relations"] },
+    "top": { "type": ["integer", "null"], "minimum": 1, "maximum": 200 },
+    "skip": { "type": ["integer", "null"], "minimum": 0, "maximum": 100000 },
+    "team": { "type": ["string", "null"], "maxLength": 256 },
+    "iterationId": { "type": ["string", "integer", "null"], "maxLength": 64, "pattern": "^[0-9A-Fa-f-]+$", "minimum": 1 },
+    "type": { "enum": [null, "assignedtome", "myactivity"] },
+    "includeCompleted": { "type": ["boolean", "null"] },
+    "workItemType": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 }
+  },
+  "allOf": [
+    { "if": { "required": ["action"], "properties": { "action": { "const": "get" } } }, "then": { "required": ["id"], "properties": { "id": { "type": "integer" } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "get_batch" } } }, "then": { "required": ["ids"], "properties": { "ids": { "type": "array" } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "enum": ["list_comments", "list_revisions"] } } }, "then": { "required": ["workItemId"], "properties": { "workItemId": { "type": "integer" } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "enum": ["list_comments", "my", "list_revisions", "list_for_iteration", "get_type"] } } }, "then": { "required": ["project"], "properties": { "project": { "type": "string" } } } },
+    { "if": { "required": ["action"], "properties": { "action": { "const": "get_type" } } }, "then": { "required": ["workItemType"], "properties": { "workItemType": { "type": "string" } } } }
+  ]
+}

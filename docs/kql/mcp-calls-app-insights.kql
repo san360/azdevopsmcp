@@ -1,0 +1,11 @@
+// Application Insights: MCP calls per method and tool with latency (native MCP APIs
+// add gen_ai.* dimensions automatically; see "Monitor MCP servers" on Microsoft Learn).
+AppRequests
+| where TimeGenerated > ago(1d)
+| extend apiType = tostring(Properties["api.type"]),
+         mcpMethod = tostring(Properties["gen_ai.operation.name"]),
+         tool = tostring(Properties["gen_ai.tool.name"])
+| where apiType == "pass-through-mcp"
+| summarize calls = count(), failures = countif(Success == false), p95Ms = percentile(DurationMs, 95)
+    by mcpMethod, tool
+| order by calls desc

@@ -1,0 +1,51 @@
+<!--
+  FRAGMENT : mcp-backend-headers (infra/policies/fragments/backend-headers.xml)
+  PURPOSE  : Prepares the request headers Azure DevOps receives: removes headers
+             a client could spoof, then adds the server-side tool restrictions.
+  USED BY  : proxy-mcp.xml and native-mcp.xml (inbound, before forwarding), so
+             both setups apply identical governance.
+  INPUT    : Named value mcp-readonly ("true" or "false") and named value
+             mcp-toolsets (comma-separated toolsets, "*" sends no header).
+  OUTPUT   : Request headers only; never answers the request itself.
+  WHY      : The backend should only see headers APIM controls. X-MCP-Readonly
+             and X-MCP-Toolsets make the Azure DevOps server itself list and run
+             fewer tools; the gateway sets them so users cannot remove them.
+             Named values let operators change them without redeploying.
+  DETAILS  : docs/POLICIES.md
+-->
+<fragment>
+  <!-- Forwarding and proxy headers: the client could fake its origin. -->
+  <set-header name="Forwarded" exists-action="delete" />
+  <set-header name="X-Forwarded-For" exists-action="delete" />
+  <set-header name="X-Forwarded-Host" exists-action="delete" />
+  <set-header name="X-Forwarded-Proto" exists-action="delete" />
+  <set-header name="X-Forwarded-Port" exists-action="delete" />
+  <set-header name="X-Original-Host" exists-action="delete" />
+  <set-header name="X-Original-URL" exists-action="delete" />
+  <set-header name="X-Rewrite-URL" exists-action="delete" />
+  <set-header name="Proxy-Authorization" exists-action="delete" />
+  <set-header name="Proxy-Connection" exists-action="delete" />
+  <!-- Platform identity headers (App Service style) a client could inject. -->
+  <set-header name="X-MS-CLIENT-PRINCIPAL" exists-action="delete" />
+  <set-header name="X-MS-CLIENT-PRINCIPAL-ID" exists-action="delete" />
+  <set-header name="X-MS-TOKEN-AAD-ACCESS-TOKEN" exists-action="delete" />
+  <!-- APIM tracing headers stay at the gateway. -->
+  <set-header name="Ocp-Apim-Trace" exists-action="delete" />
+  <set-header name="Ocp-Apim-Trace-Location" exists-action="delete" />
+  <!-- Read-only mode: the server offers read-only tools only. -->
+  <choose>
+    <when condition="@(&quot;{{mcp-readonly}}&quot; == &quot;true&quot;)">
+      <set-header name="X-MCP-Readonly" exists-action="override">
+        <value>true</value>
+      </set-header>
+    </when>
+  </choose>
+  <!-- Toolsets: limit the tool groups the server offers ("*" = server default). -->
+  <choose>
+    <when condition="@(&quot;{{mcp-toolsets}}&quot; != &quot;*&quot;)">
+      <set-header name="X-MCP-Toolsets" exists-action="override">
+        <value>{{mcp-toolsets}}</value>
+      </set-header>
+    </when>
+  </choose>
+</fragment>

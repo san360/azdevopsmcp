@@ -1,0 +1,27 @@
+<!--
+  FRAGMENT : mcp-caller-identity (infra/policies/fragments/caller-identity.xml)
+  PURPOSE  : Decodes who is calling, for telemetry only: the user's object id
+             (oid) and the client app that obtained the token (azp, or appid
+             for v1 tokens).
+  USED BY  : proxy-mcp.xml and native-mcp.xml (inbound, before their trace).
+  INPUT    : Authorization: Bearer <token> request header (optional).
+  OUTPUT   : Variables caller-oid and caller-app-id, "none" when there is no
+             token or no such claim (empty trace metadata fails the request).
+  WHY      : Both MCP APIs log the same identity fields; one fragment keeps the
+             parsing identical. The token is NOT validated here and never
+             logged: Azure DevOps validates it. Add validate-azure-ad-token
+             separately if the gateway must reject foreign tokens.
+  DETAILS  : docs/POLICIES.md
+-->
+<fragment>
+  <set-variable name="caller-oid" value="@{
+    var header = context.Request.Headers.GetValueOrDefault(&quot;Authorization&quot;, &quot;&quot;);
+    var jwt = header.StartsWith(&quot;Bearer &quot;, StringComparison.OrdinalIgnoreCase) ? header.Substring(7).AsJwt() : null;
+    return jwt == null ? &quot;none&quot; : jwt.Claims.GetValueOrDefault(&quot;oid&quot;, &quot;none&quot;);
+  }" />
+  <set-variable name="caller-app-id" value="@{
+    var header = context.Request.Headers.GetValueOrDefault(&quot;Authorization&quot;, &quot;&quot;);
+    var jwt = header.StartsWith(&quot;Bearer &quot;, StringComparison.OrdinalIgnoreCase) ? header.Substring(7).AsJwt() : null;
+    return jwt == null ? &quot;none&quot; : jwt.Claims.GetValueOrDefault(&quot;azp&quot;, jwt.Claims.GetValueOrDefault(&quot;appid&quot;, &quot;none&quot;));
+  }" />
+</fragment>

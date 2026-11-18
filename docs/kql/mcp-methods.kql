@@ -1,0 +1,6 @@
+// MCP-aware gateway log (native MCP APIs only): JSON-RPC methods, tools, clients and errors.
+ApiManagementGatewayMCPLog
+| where TimeGenerated > ago(1d)
+| project TimeGenerated, McpServerEndpoint, Method, ToolName, ClientName, ClientVersion,
+          AuthenticationMethod, TransportType, SessionId, ErrorType, Error, CorrelationId
+| order by TimeGenerated desc

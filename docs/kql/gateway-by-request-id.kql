@@ -1,0 +1,9 @@
+// Log Analytics (resource-specific table): one gateway request in full detail.
+// Use the "[apim <id>]" value printed by tools/mcp_probe.py or the x-apim-request-id response header.
+let requestId = "<x-apim-request-id>";
+ApiManagementGatewayLogs
+| where TimeGenerated > ago(1d)
+| where CorrelationId == requestId
+| project TimeGenerated, ApiId, Method, Url, ResponseCode, BackendUrl, BackendResponseCode,
+          TotalTime, BackendTime, RequestHeaders, ResponseHeaders, BackendResponseHeaders,
+          LastErrorSource, LastErrorReason, LastErrorMessage

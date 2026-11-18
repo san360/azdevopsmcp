@@ -1,0 +1,74 @@
+<!--
+  POLICY  : oauth-as-metadata.xml (working setup; OAuth discovery step 2)
+  PURPOSE : Publishes OAuth authorization-server metadata that names APIM as the
+            issuer, with /authorize, /token and /register as APIM operations that
+            front Microsoft Entra (oauth-authorize.xml, oauth-token.xml,
+            oauth-register.xml).
+  RUNS ON : API "ado-mcp-oauth-compat" (host root), operations
+            GET /.well-known/oauth-authorization-server and
+            GET /.well-known/openid-configuration. Called after the PRM, because
+            PRM authorization_servers is the gateway origin.
+  INPUT   : Anonymous GET, no body, no token.
+  OUTPUT  : 200 JSON answered by APIM: issuer = request origin, endpoints on that
+            origin, response type code, PKCE S256, public clients (auth method
+            none), scope = Azure DevOps MCP scope.
+  WHY     : RFC 8414 (s3.3: issuer must match the URL the metadata was derived
+            from) and MCP authorization (clients discover endpoints here and must
+            see S256 support). The origin comes from the request, so the default
+            host and custom domains both work.
+  VERIFY  : AppTraces step as-metadata (docs/kql/policy-traces.kql,
+            docs/kql/client-signins.kql).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE).
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Telemetry (AppTraces step as-metadata). One policy serves both
+         well-known paths; some clients try OpenID discovery first. -->
+    <trace source="ado-mcp-oauth" severity="information">
+      <message>@("oauth: authorization-server metadata served at " + context.Request.OriginalUrl.Path)</message>
+      <metadata name="step" value="as-metadata" />
+    </trace>
+    <!-- Answer locally. registration_endpoint lets clients that need dynamic
+         client registration continue (Entra has none). S256 in
+         code_challenge_methods_supported: MCP clients refuse servers that do
+         not advertise PKCE. Auth method none: public client, no secret. -->
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="Cache-Control" exists-action="override">
+        <value>no-store</value>
+      </set-header>
+      <set-header name="Access-Control-Allow-Origin" exists-action="override">
+        <value>*</value>
+      </set-header>
+      <set-body>@{
+        var url = context.Request.OriginalUrl;
+        var issuer = url.Scheme + Uri.SchemeDelimiter + url.Host;
+        var meta = new JObject();
+        meta["issuer"] = issuer;
+        meta["authorization_endpoint"] = issuer + "/authorize";
+        meta["token_endpoint"] = issuer + "/token";
+        meta["registration_endpoint"] = issuer + "/register";
+        meta["response_types_supported"] = new JArray("code");
+        meta["grant_types_supported"] = new JArray("authorization_code", "refresh_token");
+        meta["code_challenge_methods_supported"] = new JArray("S256");
+        meta["token_endpoint_auth_methods_supported"] = new JArray("none");
+        meta["scopes_supported"] = new JArray("__SCOPE__");
+        return meta.ToString();
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

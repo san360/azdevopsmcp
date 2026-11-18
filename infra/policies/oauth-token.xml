@@ -1,0 +1,92 @@
+<!--
+  POLICY  : oauth-token.xml (working setup; OAuth step 5, code and refresh exchange)
+  PURPOSE : Token endpoint compatibility. Forwards the client's form to the
+            Microsoft Entra v2 token endpoint with "resource" set to the Azure
+            DevOps MCP identifier and the Azure DevOps MCP scope added when
+            missing. Returns Entra's answer unchanged.
+  RUNS ON : API "ado-mcp-oauth-compat", operation POST /token. Called by the MCP
+            client after the browser redirect (authorization_code) and later to
+            refresh (refresh_token).
+  INPUT   : application/x-www-form-urlencoded: grant_type, code + code_verifier +
+            redirect_uri, or refresh_token; client_id; usually
+            resource={gateway URL}; optional scope.
+  OUTPUT  : Entra's token response (access_token for Azure DevOps MCP,
+            refresh_token, or an OAuth error) with Cache-Control no-store and CORS.
+  WHY     : RFC 8707: the token request repeats the resource, and Entra rejects the
+            gateway URL for an Azure DevOps scope (AADSTS9010010). Origin is
+            removed so browser clients (MCP Inspector) can redeem codes for this
+            native public client. Tokens are never logged.
+  VERIFY  : AppTraces steps token and token-response
+            (docs/kql/client-signins.kql, docs/kql/policy-traces.kql).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (TENANT_ID, SCOPE_ENC,
+            RESOURCE_ENC).
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Rewrite the raw form text: drop the client's resource, add scope
+         (SCOPE_ENC placeholder) if missing, append resource (RESOURCE_ENC
+         placeholder). Raw text keeps every value's encoding. Null guard for an
+         empty body; Entra then answers with its own error. -->
+    <set-variable name="form" value="@{
+      var body = context.Request.Body == null ? string.Empty : context.Request.Body.As&lt;string&gt;(preserveContent: false) ?? string.Empty;
+      var kept = body.Split('&amp;')
+        .Where(p =&gt; p.Length &gt; 0 &amp;&amp; !p.StartsWith(&quot;resource=&quot;, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+      if (!kept.Any(p =&gt; p.StartsWith(&quot;scope=&quot;, StringComparison.OrdinalIgnoreCase)))
+      {
+          kept.Add(&quot;scope=__SCOPE_ENC__&quot;);
+      }
+      kept.Add(&quot;resource=__RESOURCE_ENC__&quot;);
+      return string.Join(&quot;&amp;&quot;, kept);
+    }" />
+    <!-- Replace the request body with the rewritten form. -->
+    <set-body>@((string)context.Variables[&quot;form&quot;])</set-body>
+    <!-- Telemetry (AppTraces step token): grant_type only; codes, verifiers and
+         refresh tokens are never logged. -->
+    <trace source="ado-mcp-oauth" severity="information">
+      <message>@{
+        var grant = ((string)context.Variables["form"]).Split('&amp;').FirstOrDefault(p => p.StartsWith("grant_type=")) ?? "grant_type=unknown";
+        return "oauth: /token forwarded to Entra, " + grant + ", resource replaced with the Azure DevOps MCP identifier";
+      }</message>
+      <metadata name="step" value="token" />
+    </trace>
+    <!-- Entra's token endpoint only accepts form encoding. -->
+    <set-header name="Content-Type" exists-action="override">
+      <value>application/x-www-form-urlencoded</value>
+    </set-header>
+    <!-- Without this, Entra refuses cross-origin redemption for a non-SPA client
+         (AADSTS9002326) and browser clients such as MCP Inspector fail. -->
+    <set-header name="Origin" exists-action="delete" />
+    <!-- Entra v2 endpoint of the TENANT_ID placeholder; rewrite-uri targets
+         /token and drops any query parameters. -->
+    <set-backend-service base-url="https://login.microsoftonline.com/__TENANT_ID__/oauth2/v2.0" />
+    <rewrite-uri template="/token" copy-unmatched-params="false" />
+  </inbound>
+  <backend>
+    <forward-request timeout="30" />
+  </backend>
+  <outbound>
+    <base />
+    <!-- Telemetry (AppTraces step token-response): status only. The body holds
+         tokens and is neither read nor logged. -->
+    <trace source="ado-mcp-oauth" severity="information">
+      <message>@("oauth: /token response from Entra, status " + context.Response.StatusCode)</message>
+      <metadata name="step" value="token-response" />
+      <metadata name="statusCode" value="@(context.Response.StatusCode.ToString())" />
+    </trace>
+    <!-- Token responses must not be cached (RFC 6749 s5.1): Cache-Control
+         no-store plus x-apim-request-id (fragment). -->
+    <include-fragment fragment-id="mcp-response-headers" />
+    <!-- Drop Entra session cookies; they belong to the Entra host, not the
+         gateway. CORS header: browser clients may read the response. -->
+    <set-header name="Set-Cookie" exists-action="delete" />
+    <set-header name="Access-Control-Allow-Origin" exists-action="override">
+      <value>*</value>
+    </set-header>
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

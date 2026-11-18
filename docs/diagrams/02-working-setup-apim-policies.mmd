@@ -1,0 +1,39 @@
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant C as MCP client
+    participant P as APIM /ado-mcp-proxy/{org}<br/>proxy-mcp.xml
+    participant A as APIM OAuth compatibility<br/>/.well-known, /register,<br/>/authorize, /token
+    participant O as Azure DevOps MCP<br/>mcp.dev.azure.com/{org}
+    participant E as Microsoft Entra ID
+
+    C->>P: POST initialize (no token)
+    Note over P: org validated against the allow-list (else 404)
+    P->>O: forward to /{org} (HTTPS check, rate limit, X-MCP-Readonly, header hygiene)
+    O-->>P: 401 resource_metadata=mcp.dev.azure.com/...
+    Note over P: CHANGE 1 (outbound): replace WWW-Authenticate with<br/>resource_metadata={gateway}/.well-known/oauth-protected-resource/ado-mcp-proxy/{org}
+    P-->>C: 401 (APIM-hosted metadata)
+    C->>A: GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org}
+    Note over A: CHANGE 2 (oauth-prm.xml): APIM serves PRM per URL<br/>resource={gateway}/ado-mcp-proxy/{org}, authorization_servers=[{gateway}]
+    A-->>C: PRM (resource matches the URL the client used)
+    C->>A: GET /.well-known/oauth-authorization-server
+    Note over A: CHANGE 3 (oauth-as-metadata.xml): APIM is the authorization server<br/>(issuer={gateway}) with /authorize, /token and /register
+    A-->>C: AS metadata
+    C->>A: POST /register (dynamic client registration)
+    Note over A: CHANGE 4 (oauth-register.xml): return the pre-registered<br/>Entra public client ID (Entra has no DCR endpoint)
+    A-->>C: client_id
+    C->>U: open browser
+    U->>A: GET /authorize?...&resource={gateway}/ado-mcp-proxy/{org}
+    Note over A: CHANGE 5 (oauth-authorize.xml): drop the client's resource,<br/>set resource=https://mcp.dev.azure.com, require PKCE S256
+    A-->>U: 302 to login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize
+    U->>E: sign in + consent
+    E-->>C: browser redirect with authorization code (127.0.0.1 / vscode.dev)
+    C->>A: POST /token (code, code_verifier, resource={gateway}/...)
+    Note over A: CHANGE 6 (oauth-token.xml): same resource rewrite, remove Origin,<br/>forward to Entra, tokens never logged
+    A->>E: POST /token (resource=https://mcp.dev.azure.com)
+    E-->>A: access_token (aud = Azure DevOps MCP, the user) + refresh_token
+    A-->>C: token response unchanged
+    C->>P: POST initialize, tools/list, tools/call + Bearer
+    Note over P: CHANGE 7: forward the user's token unchanged to /{org},<br/>no response buffering (SSE), correlation ID, telemetry
+    P->>O: same token
+    O-->>C: results, Azure DevOps authorizes as the signed-in user

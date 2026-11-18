@@ -1,0 +1,95 @@
+<!--
+  POLICY  : oauth-register.xml (working setup; OAuth step 3, client registration)
+  PURPOSE : Dynamic client registration (DCR) compatibility. Every MCP client that
+            registers gets the same pre-registered Entra public client id, because
+            Microsoft Entra has no registration endpoint.
+  RUNS ON : API "ado-mcp-oauth-compat", operation POST /register. Called after the
+            authorization-server metadata by clients without a configured client
+            id (Codex, Claude Code, GitHub Copilot CLI, VS Code, MCP Inspector).
+  INPUT   : RFC 7591 JSON, typically client_name, redirect_uris, grant_types,
+            token_endpoint_auth_method none. Empty or invalid bodies are tolerated.
+  OUTPUT  : 201 JSON answered by APIM: client_id = the pre-registered public
+            client, redirect_uris echoed (VS Code defaults if none were sent),
+            token_endpoint_auth_method none. No secret is issued.
+  WHY     : RFC 7591 and MCP authorization 2025-06-18 (clients SHOULD use DCR).
+            Without it, DCR clients stop with "Incompatible auth server: does not
+            support dynamic client registration". Entra still accepts only redirect
+            URIs registered on the app, so each client's redirect must be added
+            there.
+  VERIFY  : AppTraces step register with clientName and redirectUris
+            (docs/kql/client-signins.kql).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (CLIENT_ID).
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Parse the registration request once. Null and parse guards: an empty or
+         invalid body still gets the static answer instead of HTTP 500. -->
+    <set-variable name="dcr-request" value="@{
+      try { return context.Request.Body == null ? new JObject() : context.Request.Body.As&lt;JObject&gt;(preserveContent: true) ?? new JObject(); } catch { return new JObject(); }
+    }" />
+    <!-- Telemetry (AppTraces step register): client name and requested redirect
+         URIs, the quickest way to see which redirect a client needs on the
+         Entra app. Nothing secret is in a registration request. -->
+    <trace source="ado-mcp-oauth" severity="information">
+      <message>@{
+        var request = (JObject)context.Variables[&quot;dcr-request&quot;];
+        var name = request[&quot;client_name&quot;] == null ? &quot;none&quot; : (string)request[&quot;client_name&quot;];
+        return &quot;oauth: dynamic client registration from &quot; + name + &quot; answered with the pre-registered public client&quot;;
+      }</message>
+      <metadata name="step" value="register" />
+      <metadata name="clientName" value="@{
+        var request = (JObject)context.Variables[&quot;dcr-request&quot;];
+        var name = request[&quot;client_name&quot;] == null ? &quot;none&quot; : (string)request[&quot;client_name&quot;];
+        return name.Length == 0 ? &quot;none&quot; : (name.Length &gt; 80 ? name.Substring(0, 80) : name);
+      }" />
+      <metadata name="redirectUris" value="@{
+        var request = (JObject)context.Variables[&quot;dcr-request&quot;];
+        var uris = request[&quot;redirect_uris&quot;] as JArray;
+        return uris == null || uris.Count == 0 ? &quot;none&quot; : string.Join(&quot; &quot;, uris.Select(u =&gt; (string)u));
+      }" />
+    </trace>
+    <!-- 201 Created as RFC 7591 requires. client_id = CLIENT_ID placeholder.
+         redirect_uris are echoed because clients compare them with what they
+         sent. Auth method none: public client; the client proves itself with
+         PKCE, not a secret. -->
+    <return-response>
+      <set-status code="201" reason="Created" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="Cache-Control" exists-action="override">
+        <value>no-store</value>
+      </set-header>
+      <set-header name="Access-Control-Allow-Origin" exists-action="override">
+        <value>*</value>
+      </set-header>
+      <set-body>@{
+        JObject request = (JObject)context.Variables[&quot;dcr-request&quot;];
+        var redirects = request != null &amp;&amp; request["redirect_uris"] is JArray
+          ? (JArray)request["redirect_uris"]
+          : new JArray("http://127.0.0.1:33418/", "https://vscode.dev/redirect");
+        var response = new JObject();
+        response["client_id"] = "__CLIENT_ID__";
+        response["client_id_issued_at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        response["client_name"] = request != null &amp;&amp; request["client_name"] != null ? request["client_name"] : "MCP client";
+        response["application_type"] = "native";
+        response["redirect_uris"] = redirects;
+        response["grant_types"] = new JArray("authorization_code", "refresh_token");
+        response["response_types"] = new JArray("code");
+        response["token_endpoint_auth_method"] = "none";
+        return response.ToString();
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

@@ -1,0 +1,26 @@
+// Application Insights: how each MCP client signed in and connected, step by step.
+// Shows the client (User-Agent), the OAuth step (register, authorize, token), the redirect URI and
+// RFC 8707 resource the client asked for, and the client app (azp) of the token it later used.
+// Run it a few minutes after a sign-in. Optional: replace <client> with part of a User-Agent
+// (for example codex, claude, copilot, vscode); left as is, all clients are shown.
+let client = "<client>";
+let unfiltered = client has "client";
+AppRequests
+| where TimeGenerated > ago(1d)
+| extend userAgent = tostring(Properties["Request-User-Agent"])
+| where unfiltered or userAgent contains client
+| join kind=leftouter (
+    AppTraces
+    | where TimeGenerated > ago(1d)
+    | extend step = tostring(Properties["step"])
+    | where step in ("register", "authorize", "token", "token-response", "prm", "as-metadata",
+                     "proxy-inbound", "native-inbound", "tool-validation")
+    | project ParentId, step, Message,
+              clientName = tostring(Properties["clientName"]),
+              redirect = coalesce(tostring(Properties["redirectUri"]), tostring(Properties["redirectUris"])),
+              clientResource = tostring(Properties["clientResource"]),
+              clientAppId = tostring(Properties["clientAppId"])
+  ) on $left.Id == $right.ParentId
+| project TimeGenerated, userAgent = substring(userAgent, 0, 60), request = Name, ResultCode, step,
+          clientName, redirect, clientResource, clientAppId, OperationId
+| order by TimeGenerated asc

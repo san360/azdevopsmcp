@@ -1,0 +1,76 @@
+<!--
+  POLICY  : oauth-prm.xml (working setup; OAuth discovery step 1)
+  PURPOSE : Serves OAuth protected-resource metadata (PRM) computed from the
+            request URL, so "resource" is exactly the URL the client connects to
+            and the authorization server is the gateway itself.
+  RUNS ON : API "ado-mcp-oauth-compat" (host root), operations
+            GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org} and
+            GET /.well-known/oauth-protected-resource/ado-mcp-proxy. Called right
+            after the proxy's 401 challenge, before any sign-in.
+  INPUT   : Anonymous GET, no body, no token.
+  OUTPUT  : 200 JSON, answered by APIM without a backend call:
+            resource = {origin}/ado-mcp-proxy[/{org}],
+            authorization_servers = [{origin}], scopes_supported = Azure DevOps
+            MCP scope. 404 for an organization the proxy would reject.
+  WHY     : RFC 9728 s3.3: resource must equal the URL the client used (VS Code
+            enforces it). Pointing authorization_servers at the gateway lets APIM
+            translate the RFC 8707 resource before Entra sees it (AADSTS9010010
+            otherwise). The origin comes from the request, so custom domains work.
+  VERIFY  : AppTraces step prm (docs/kql/policy-traces.kql,
+            docs/kql/client-signins.kql).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE). The organization
+            check is the fragment mcp-org-validation.
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Organization: same check and allow-list as proxy-mcp.xml (fragment), so
+         there is no metadata for an organization the proxy rejects. Empty 404. -->
+    <include-fragment fragment-id="mcp-org-validation" />
+    <!-- Telemetry (AppTraces step prm) with the organization. -->
+    <trace source="ado-mcp-oauth" severity="information">
+      <message>@("oauth: protected-resource metadata served for " + context.Request.OriginalUrl.Path)</message>
+      <metadata name="step" value="prm" />
+      <metadata name="organization" value="@((string)context.Variables[&quot;org&quot;] == &quot;&quot; ? &quot;none&quot; : (string)context.Variables[&quot;org&quot;])" />
+    </trace>
+    <!-- Answer locally. resource = origin plus the path after
+         /.well-known/oauth-protected-resource; authorization_servers = origin,
+         so clients read APIM's authorization-server metadata, not Entra's.
+         scopes_supported = SCOPE placeholder. Access-Control-Allow-Origin lets
+         browser clients (MCP Inspector) read it; no-store avoids stale copies. -->
+    <return-response>
+      <set-status code="200" reason="OK" />
+      <set-header name="Content-Type" exists-action="override">
+        <value>application/json</value>
+      </set-header>
+      <set-header name="Cache-Control" exists-action="override">
+        <value>no-store</value>
+      </set-header>
+      <set-header name="Access-Control-Allow-Origin" exists-action="override">
+        <value>*</value>
+      </set-header>
+      <set-body>@{
+        var url = context.Request.OriginalUrl;
+        var origin = url.Scheme + Uri.SchemeDelimiter + url.Host;
+        var resourcePath = url.Path.Substring("/.well-known/oauth-protected-resource".Length).TrimEnd('/');
+        var prm = new JObject();
+        prm["resource"] = origin + resourcePath;
+        prm["authorization_servers"] = new JArray(origin);
+        prm["bearer_methods_supported"] = new JArray("header");
+        prm["scopes_supported"] = new JArray("__SCOPE__");
+        prm["resource_name"] = "Azure DevOps MCP via API Management";
+        return prm.ToString();
+      }</set-body>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

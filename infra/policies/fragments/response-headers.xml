@@ -1,0 +1,23 @@
+<!--
+  FRAGMENT : mcp-response-headers (infra/policies/fragments/response-headers.xml)
+  PURPOSE  : Response hardening and traceability: no caching, plus the APIM
+             request id on every answer, including errors.
+  USED BY  : proxy-mcp.xml and native-mcp.xml (outbound and on-error),
+             oauth-token.xml (outbound).
+  INPUT    : None.
+  OUTPUT   : Response headers Cache-Control: no-store and x-apim-request-id.
+  WHY      : MCP results, challenges and tokens belong to one user; shared
+             caches must never store them (RFC 6749 s5.1 for tokens).
+             x-apim-request-id is the CorrelationId in ApiManagementGatewayLogs,
+             so any response a user reports can be found in the logs
+             (docs/kql/gateway-by-request-id.kql).
+  DETAILS  : docs/POLICIES.md
+-->
+<fragment>
+  <set-header name="Cache-Control" exists-action="override">
+    <value>no-store</value>
+  </set-header>
+  <set-header name="x-apim-request-id" exists-action="override">
+    <value>@(context.RequestId.ToString())</value>
+  </set-header>
+</fragment>

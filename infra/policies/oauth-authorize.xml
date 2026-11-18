@@ -1,0 +1,80 @@
+<!--
+  POLICY  : oauth-authorize.xml (working setup; OAuth step 4, browser sign-in)
+  PURPOSE : Authorization endpoint compatibility. Redirects the browser to the
+            Microsoft Entra v2 authorize endpoint with the client's parameters,
+            except that the RFC 8707 "resource" becomes the Azure DevOps MCP
+            identifier and a scope is added when missing.
+  RUNS ON : API "ado-mcp-oauth-compat", operation GET /authorize, opened in the
+            user's browser by the MCP client after registration.
+  INPUT   : Query string with client_id, response_type=code, redirect_uri, state,
+            code_challenge, code_challenge_method=S256, usually scope and
+            resource={gateway}/ado-mcp-proxy/{org}.
+  OUTPUT  : 302 to Entra authorize with resource=https://mcp.dev.azure.com, or 400
+            JSON invalid_request when PKCE S256 is missing.
+  WHY     : Entra rejects a gateway URL as resource for an Azure DevOps scope
+            (AADSTS9010010). RFC 7636 and MCP authorization require PKCE. The raw
+            query string is filtered, not decoded and re-encoded, so values keep
+            their encoding. Entra still enforces client_id, redirect_uri, consent.
+  VERIFY  : AppTraces step authorize with clientId, redirectUri, clientResource
+            (docs/kql/client-signins.kql).
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (TENANT_ID, SCOPE_ENC,
+            RESOURCE_ENC).
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Require PKCE S256. This public client has no secret, so without PKCE an
+         intercepted code could be redeemed by anyone. Rejected before Entra. -->
+    <choose>
+      <when condition="@(context.Request.Url.Query.GetValueOrDefault(&quot;code_challenge&quot;, &quot;&quot;) == &quot;&quot; || context.Request.Url.Query.GetValueOrDefault(&quot;code_challenge_method&quot;, &quot;&quot;) != &quot;S256&quot;)">
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":"invalid_request","error_description":"PKCE with code_challenge_method=S256 is required."}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <!-- Telemetry (AppTraces step authorize): client id, redirect URI and the
+         resource the client asked for. code_challenge and state are not logged. -->
+    <trace source="ado-mcp-oauth" severity="information">
+      <message>@("oauth: /authorize redirected to Entra, client resource " + context.Request.Url.Query.GetValueOrDefault("resource", "none") + " replaced with the Azure DevOps MCP identifier")</message>
+      <metadata name="step" value="authorize" />
+      <metadata name="clientId" value="@(context.Request.Url.Query.GetValueOrDefault(&quot;client_id&quot;, &quot;none&quot;))" />
+      <metadata name="redirectUri" value="@(context.Request.Url.Query.GetValueOrDefault(&quot;redirect_uri&quot;, &quot;none&quot;))" />
+      <metadata name="clientResource" value="@(context.Request.Url.Query.GetValueOrDefault(&quot;resource&quot;, &quot;none&quot;))" />
+    </trace>
+    <!-- Redirect to Entra (TENANT_ID placeholder). Drop the client's resource
+         (the gateway URL from the PRM), add scope (SCOPE_ENC placeholder) only
+         if missing, append resource (RESOURCE_ENC placeholder, the Azure DevOps
+         MCP identifier, URL encoded). no-store: never cache the redirect. -->
+    <return-response>
+      <set-status code="302" reason="Found" />
+      <set-header name="Location" exists-action="override">
+        <value>@{
+          var parts = context.Request.OriginalUrl.QueryString.TrimStart('?')
+            .Split('&amp;')
+            .Where(p => p.Length > 0 &amp;&amp; !p.StartsWith("resource=", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+          if (!parts.Any(p => p.StartsWith("scope=", StringComparison.OrdinalIgnoreCase))) { parts.Add("scope=__SCOPE_ENC__"); }
+          parts.Add("resource=__RESOURCE_ENC__");
+          return "https://login.microsoftonline.com/__TENANT_ID__/oauth2/v2.0/authorize?" + string.Join("&amp;", parts);
+        }</value>
+      </set-header>
+      <set-header name="Cache-Control" exists-action="override">
+        <value>no-store</value>
+      </set-header>
+    </return-response>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

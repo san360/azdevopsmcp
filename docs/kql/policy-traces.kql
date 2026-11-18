@@ -1,0 +1,16 @@
+// Application Insights: events emitted by the <trace> policies, each with its gateway request.
+// Optional: replace <run-id> with a probe run ID ("x-mcp-test-run"); left as is, all runs are shown.
+let runId = "<run-id>";
+let unfiltered = runId has "run-id";
+let requestsInScope = AppRequests
+    | where TimeGenerated > ago(1d)
+    | where unfiltered or tostring(Properties["Request-x-mcp-test-run"]) == runId
+    | project RequestId = Id, request = Name, ResultCode, OperationId;
+AppTraces
+| where TimeGenerated > ago(1d)
+| extend step = tostring(Properties["step"]), organization = tostring(Properties["organization"]),
+         mcpMethod = tostring(Properties["mcpMethod"]), userOid = tostring(Properties["userOid"]),
+         clientAppId = tostring(Properties["clientAppId"])
+| join kind=inner requestsInScope on $left.ParentId == $right.RequestId
+| project TimeGenerated, request, ResultCode, step, Message, mcpMethod, organization, userOid, clientAppId, OperationId
+| order by TimeGenerated asc

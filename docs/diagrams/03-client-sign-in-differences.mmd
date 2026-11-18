@@ -1,0 +1,34 @@
+sequenceDiagram
+    autonumber
+    actor U as User (browser)
+    participant C as CLI client
+    participant P as APIM proxy<br/>/ado-mcp-proxy/{org}
+    participant A as APIM OAuth endpoints<br/>/.well-known, /register,<br/>/authorize, /token
+    participant E as Microsoft Entra ID
+    participant O as Azure DevOps MCP
+
+    alt Codex
+        C->>P: GET /ado-mcp-proxy/{org} (no body, no token)
+        Note over P: Change 7: must answer 405, not 500
+        C->>A: GET /.well-known/oauth-protected-resource/ado-mcp-proxy/{org}
+    else Copilot CLI, Claude Code, VS Code
+        C->>P: POST initialize (no token)
+        P-->>C: 401 WWW-Authenticate: resource_metadata=..., scope=... (change 6)
+        C->>A: GET the resource_metadata URL
+    end
+    A-->>C: PRM: resource = the URL the client used, authorization server = gateway (change 1)
+    C->>A: GET /.well-known/oauth-authorization-server
+    A-->>C: issuer = gateway, /authorize, /token, /register (change 2)
+    C->>A: POST /register {client_name, redirect_uris}
+    A-->>C: the pre-registered Entra public client ID (change 3)
+    Note over C: Redirect URI differs: Copilot 127.0.0.1:{port}/ ·<br/>Codex 127.0.0.1:{port}/callback/{id} · Claude localhost:{port}/callback
+    C->>U: open browser
+    U->>A: GET /authorize ... resource={gateway URL}
+    A-->>U: 302 to Entra with resource=https://mcp.dev.azure.com (change 4)
+    U->>E: sign in, Entra checks the redirect URI (change 8)
+    E-->>C: code, delivered to the client's local redirect URI
+    C->>A: POST /token (code, PKCE verifier, resource={gateway URL})
+    A->>E: same request with resource=https://mcp.dev.azure.com (change 5)
+    E-->>C: user token, audience Azure DevOps MCP
+    C->>P: initialize, tools/list, tools/call + Bearer token
+    P->>O: forwarded unchanged, Azure DevOps acts as the user

@@ -1,0 +1,7 @@
+// Gateway URL -> backend URL mapping per API. Catches path mistakes such as an
+// MCP endpoint override being ignored (backend called as https://mcp.dev.azure.com/mcp,
+// which the server treats as an organization named "mcp" -> VS30063).
+ApiManagementGatewayLogs
+| where TimeGenerated > ago(1d)
+| summarize requests = count(), statuses = make_set(ResponseCode) by ApiId, Url, BackendUrl
+| order by ApiId asc

@@ -1,0 +1,25 @@
+.local/
+captures/
+logs/
+raw/
+report/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.bicepparam
+*.local.*
+*.log
+*.jsonl
+*.har
+*.pem
+*.pfx
+*.key
+infra/*.json
+!infra/*.example.json
+
+# Internal material (customer email, internal links, unsanitized lab captures). Never commit.
+internal/

@@ -1,0 +1,7 @@
+// Failures across all APIs, with the APIM pipeline stage that raised them.
+ApiManagementGatewayLogs
+| where TimeGenerated > ago(1d)
+| where ResponseCode >= 400 or isnotempty(LastErrorReason)
+| project TimeGenerated, ApiId, Method, Url, ResponseCode, BackendResponseCode,
+          LastErrorSource, LastErrorSection, LastErrorReason, LastErrorMessage, CorrelationId
+| order by TimeGenerated desc

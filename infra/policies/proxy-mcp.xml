@@ -1,0 +1,159 @@
+<!--
+  POLICY  : proxy-mcp.xml (working setup; MCP data plane)
+  PURPOSE : Governed HTTP pass-through to the hosted Azure DevOps MCP server. It
+            forwards the caller's Entra token unchanged, so Azure DevOps authorizes
+            every call as the signed-in user; APIM only governs the edge.
+  RUNS ON : API "ado-mcp-proxy" (type http), all operations: POST/GET/DELETE on
+            {gateway}/ado-mcp-proxy/{org} and on {gateway}/ado-mcp-proxy (bare
+            endpoint, tools then take orgName). First call of every sign-in (401)
+            and every MCP message after it.
+  INPUT   : MCP Streamable HTTP request: JSON-RPC POST (initialize, tools/list,
+            tools/call, notifications), or a body-less GET/DELETE.
+  OUTPUT  : Forwarded to https://mcp.dev.azure.com/{org}; the SSE response streams
+            back unbuffered. A 401 gets a WWW-Authenticate that points at
+            APIM-hosted PRM for this exact URL. Local answers: 400 (not HTTPS),
+            404 (unknown organization), 429 (rate limit), JSON-RPC error (tool
+            validation fragment).
+  WHY     : MCP authorization 2025-06-18 and RFC 9728: the challenge must lead the
+            client to metadata whose resource equals the URL it used and whose
+            authorization server accepts that resource. Streamable HTTP: SSE must
+            not be buffered, so never read context.Response.Body here.
+  VERIFY  : AppTraces steps proxy-inbound, proxy-outbound, proxy-error
+            (docs/kql/policy-traces.kql); challenge rewrite in
+            docs/kql/www-authenticate-rewrite.kql; failures in docs/kql/errors.kql.
+  STEPS   : inbound 1 HTTPS only, 2 organization (fragment mcp-org-validation),
+            3 correlation id, 4 MCP method, 5 caller (fragment mcp-caller-identity),
+            6 trace, 7 rate limit, 8 tool validation (fragment mcp-tool-validation),
+            9 backend headers (fragment mcp-backend-headers), 10 backend.
+            outbound: challenge rewrite, response headers (fragment
+            mcp-response-headers), trace. Fragments: infra/policies/fragments/.
+  FILLED  : by fill() in infra/modules/mcp-proxy.bicep (BACKEND_ID, SCOPE,
+            RATE_LIMIT_CALLS, RATE_LIMIT_PERIOD, TOOL_VALIDATION).
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Refuse plain HTTP: the bearer token would travel unencrypted. The API
+         only lists https, so this is defence in depth. -->
+    <choose>
+      <when condition="@(context.Request.OriginalUrl.Scheme != &quot;https&quot;)">
+        <return-response>
+          <set-status code="400" reason="HTTPS Required" />
+          <set-header name="Cache-Control" exists-action="override">
+            <value>no-store</value>
+          </set-header>
+        </return-response>
+      </when>
+    </choose>
+    <!-- Organization: sets variable org, or answers 404 {"error":"unknown_organization"}
+         for a malformed or not allowed name (fragment, shared with oauth-prm.xml). -->
+    <set-variable name="org-404-body" value="json" />
+    <include-fragment fragment-id="mcp-org-validation" />
+    <!-- Reuse a caller's X-Correlation-ID only if it is a GUID (no log
+         injection); otherwise use the APIM request id. -->
+    <set-variable name="correlation-id" value="@{
+      var supplied = context.Request.Headers.GetValueOrDefault(&quot;X-Correlation-ID&quot;, &quot;&quot;);
+      Guid parsed;
+      return Guid.TryParse(supplied, out parsed) ? parsed.ToString(&quot;D&quot;) : context.RequestId.ToString(&quot;D&quot;);
+    }" />
+    <!-- JSON-RPC method for telemetry. Reading the request body is safe (requests
+         are buffered, responses are not); preserveContent keeps it for
+         forwarding. Body-less GET/DELETE and non-JSON bodies fall back to the
+         HTTP method instead of failing. -->
+    <set-variable name="mcp-method" value="@{
+      try { var body = context.Request.Body?.As&lt;JObject&gt;(preserveContent: true); return body == null ? context.Request.Method : (string)body[&quot;method&quot;] ?? &quot;(response)&quot;; }
+      catch { return context.Request.Method; }
+    }" />
+    <!-- Caller: variables caller-oid and caller-app-id from the token claims, for
+         telemetry only (fragment, shared with native-mcp.xml). -->
+    <include-fragment fragment-id="mcp-caller-identity" />
+    <!-- Telemetry (AppTraces step proxy-inbound): MCP method, organization,
+         correlation id, user oid and client app id. -->
+    <trace source="ado-mcp-proxy" severity="information">
+      <message>@("proxy inbound: " + (string)context.Variables["mcp-method"] + " org=" + ((string)context.Variables["org"] == "" ? "none" : (string)context.Variables["org"]) + " auth=" + (context.Request.Headers.ContainsKey("Authorization") ? "bearer" : "none"))</message>
+      <metadata name="step" value="proxy-inbound" />
+      <metadata name="mcpMethod" value="@((string)context.Variables[&quot;mcp-method&quot;])" />
+      <metadata name="organization" value="@((string)context.Variables[&quot;org&quot;] == &quot;&quot; ? &quot;none&quot; : (string)context.Variables[&quot;org&quot;])" />
+      <metadata name="correlationId" value="@((string)context.Variables[&quot;correlation-id&quot;])" />
+      <metadata name="userOid" value="@((string)context.Variables[&quot;caller-oid&quot;])" />
+      <metadata name="clientAppId" value="@((string)context.Variables[&quot;caller-app-id&quot;])" />
+    </trace>
+    <!-- Per client IP throttle: RATE_LIMIT_CALLS calls per RATE_LIMIT_PERIOD
+         seconds, then 429 with Retry-After. Protects the backend and the user's
+         Azure DevOps request budget. -->
+    <rate-limit-by-key calls="__RATE_LIMIT_CALLS__" renewal-period="__RATE_LIMIT_PERIOD__" counter-key="@(&quot;ado-mcp|&quot; + context.Request.IpAddress)" retry-after-header-name="Retry-After" />
+    <!-- Tool validation slot: include-fragment mcp-tool-validation
+         (tool-validation.xml) or empty. It must run before forwarding so an
+         invalid tools/call never reaches Azure DevOps. -->
+    __TOOL_VALIDATION__
+    <!-- Backend headers: strip spoofable forwarding, identity and trace headers;
+         add X-MCP-Readonly / X-MCP-Toolsets from named values (fragment, shared
+         with native-mcp.xml). -->
+    <include-fragment fragment-id="mcp-backend-headers" />
+    <!-- Pass the correlation id to Azure DevOps as well. -->
+    <set-header name="X-Correlation-ID" exists-action="override">
+      <value>@((string)context.Variables[&quot;correlation-id&quot;])</value>
+    </set-header>
+    <!-- BACKEND_ID placeholder: the backend for https://mcp.dev.azure.com. APIM
+         appends the rest of the client path (/{org}), so one backend serves
+         every organization. -->
+    <set-backend-service backend-id="__BACKEND_ID__" />
+  </inbound>
+  <backend>
+    <!-- No base here on purpose. buffer-response false streams SSE events as
+         they arrive (buffering holds them until the stream ends).
+         follow-redirects false: never follow a redirect with the user's token.
+         240 s timeout for long tool calls. -->
+    <forward-request follow-redirects="false" buffer-response="false" timeout="240" />
+  </backend>
+  <outbound>
+    <base />
+    <!-- Origin 401: its challenge points at mcp.dev.azure.com metadata whose
+         resource does not match this URL, so replace it (see below). -->
+    <choose>
+      <when condition="@(context.Response.StatusCode == 401)">
+        <!-- Point MCP clients at APIM-hosted PRM for this exact URL (per
+             organization). The scope parameter (SCOPE placeholder) follows MCP
+             2025-11-25, which recommends it in the challenge; GitHub Copilot CLI
+             uses it. -->
+        <set-header name="WWW-Authenticate" exists-action="override">
+          <value>@{
+            var url = context.Request.OriginalUrl;
+            return "Bearer resource_metadata=\"" + url.Scheme + Uri.SchemeDelimiter + url.Host
+              + "/.well-known/oauth-protected-resource" + url.Path.TrimEnd('/') + "\", scope=\"__SCOPE__\"";
+          }</value>
+        </set-header>
+      </when>
+    </choose>
+    <!-- Cache-Control: no-store and x-apim-request-id (fragment). -->
+    <include-fragment fragment-id="mcp-response-headers" />
+    <!-- Echo the correlation id for support and log lookup. -->
+    <set-header name="X-Correlation-ID" exists-action="override">
+      <value>@((string)context.Variables[&quot;correlation-id&quot;])</value>
+    </set-header>
+    <!-- Telemetry (AppTraces step proxy-outbound): status code per MCP method.
+         Uses the status only, never context.Response.Body (would buffer SSE). -->
+    <trace source="ado-mcp-proxy" severity="information">
+      <message>@("proxy outbound: " + (string)context.Variables["mcp-method"] + " status " + context.Response.StatusCode + (context.Response.StatusCode == 401 ? ", challenge points at APIM-hosted metadata" : ""))</message>
+      <metadata name="step" value="proxy-outbound" />
+      <metadata name="statusCode" value="@(context.Response.StatusCode.ToString())" />
+      <metadata name="correlationId" value="@((string)context.Variables[&quot;correlation-id&quot;])" />
+    </trace>
+  </outbound>
+  <on-error>
+    <base />
+    <!-- Telemetry (AppTraces step proxy-error) with the policy that failed
+         (LastError.Source). docs/kql/errors.kql shows the gateway side. -->
+    <trace source="ado-mcp-proxy" severity="error">
+      <message>@("proxy error: " + (context.LastError == null ? "" : context.LastError.Reason + " " + context.LastError.Message))</message>
+      <metadata name="step" value="proxy-error" />
+      <metadata name="source" value="@(context.LastError == null || string.IsNullOrEmpty(context.LastError.Source) ? &quot;none&quot; : context.LastError.Source)" />
+    </trace>
+    <include-fragment fragment-id="mcp-response-headers" />
+    <!-- GetValueOrDefault: the error can occur before correlation-id was set. -->
+    <set-header name="X-Correlation-ID" exists-action="override">
+      <value>@(context.Variables.GetValueOrDefault&lt;string&gt;(&quot;correlation-id&quot;, context.RequestId.ToString(&quot;D&quot;)))</value>
+    </set-header>
+  </on-error>
+</policies>

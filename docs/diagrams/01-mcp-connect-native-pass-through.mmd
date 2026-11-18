@@ -1,0 +1,39 @@
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant C as MCP client<br/>(VS Code, Inspector)
+    participant G as APIM native MCP<br/>/ado-mcp-native/{org}
+    participant O as Azure DevOps MCP<br/>mcp.dev.azure.com/{org}
+    participant E as Microsoft Entra ID
+
+    rect rgb(235, 242, 255)
+    Note over C,O: Phase A: discovery (no token)
+    C->>G: POST initialize (no Authorization)
+    G->>O: POST /{org}
+    O-->>G: 401 WWW-Authenticate: resource_metadata=".../oauth-protected-resource/{org}"
+    G-->>C: 401 with resource_metadata rewritten to {gateway}/ado-mcp-native/.well-known/...
+    C->>G: GET protected-resource metadata
+    G->>O: GET /.well-known/oauth-protected-resource/{org}
+    O-->>G: resource=https://mcp.dev.azure.com/{org}, scopes=https://mcp.dev.azure.com/.default
+    G-->>C: resource REWRITTEN to {gateway}/ado-mcp-native/{org}, scopes unchanged
+    C->>C: check resource == server URL (passes)
+    C->>E: GET OpenID / OAuth metadata of the tenant
+    end
+
+    rect rgb(255, 236, 236)
+    Note over U,E: Phase B: authorization code + PKCE with RFC 8707 resource
+    C->>U: open browser
+    U->>E: /authorize?client_id, scope=https://mcp.dev.azure.com/.default,<br/>resource={gateway}/ado-mcp-native/{org}, code_challenge
+    E-->>U: AADSTS9010010 invalid_target (resource does not match scope)
+    Note over C,E: Sign-in stops here. No token is issued.
+    end
+
+    rect rgb(235, 250, 235)
+    Note over C,O: Phase C: MCP session (verified with a pre-acquired token)
+    C->>G: POST initialize, Authorization: Bearer (aud = Azure DevOps MCP)
+    G->>O: forwarded with the same token
+    O-->>C: 200 SSE: protocolVersion, capabilities, serverInfo
+    C->>G: notifications/initialized, tools/list, tools/call
+    G->>O: forwarded
+    O-->>C: 202 / tool list / tool result, Azure DevOps acts as the user
+    end

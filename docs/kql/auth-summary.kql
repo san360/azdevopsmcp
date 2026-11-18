@@ -1,0 +1,7 @@
+// Requests per API, authentication type (none = discovery, bearer-token = signed-in user)
+// and result code.
+AppRequests
+| where TimeGenerated > ago(1d)
+| extend api = tostring(split(OperationName, ";")[0]), auth = tostring(Properties["auth.type"])
+| summarize requests = count(), ok = countif(Success == true) by api, auth, ResultCode
+| order by api asc, ResultCode asc

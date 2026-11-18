@@ -1,0 +1,67 @@
+<!--
+  POLICY  : native-mcp.xml (regular setup; reproduces the sign-in problem)
+  PURPOSE : Policy of APIM's native MCP pass-through API ("expose an existing MCP
+            server"). It only adds a read-only header, a request id and telemetry;
+            it cannot fix OAuth discovery.
+  RUNS ON : API "ado-mcp-native" (type mcp), every request to
+            {gateway}/ado-mcp-native/{org}: the unauthenticated first call and every
+            MCP message after sign-in. The API has no operations.
+  INPUT   : MCP Streamable HTTP request (JSON-RPC POST, or GET/DELETE), with or
+            without "Authorization: Bearer".
+  OUTPUT  : Forwarded to https://mcp.dev.azure.com/{org}; the response (often an
+            SSE stream) is returned unchanged plus x-apim-request-id. APIM itself
+            rewrites the 401 resource_metadata URL and the PRM "resource" to the
+            gateway URL. That is built in and no policy can change it.
+  WHY     : Shows the problem: clients then send resource={gateway URL} with the
+            Azure DevOps scope and Entra answers AADSTS9010010 (MCP authorization
+            2025-06-18, RFC 9728, RFC 8707). Never read context.Response.Body
+            here: it would buffer the SSE stream.
+  VERIFY  : AppTraces step native-inbound / native-outbound
+            (docs/kql/policy-traces.kql); the rewritten challenge in
+            docs/kql/www-authenticate-rewrite.kql.
+  STEPS   : inbound 1 backend headers (fragment mcp-backend-headers), 2 caller
+            (fragment mcp-caller-identity), 3 trace. outbound: response headers
+            (fragment mcp-response-headers), trace. No tool validation: it
+            needs an API operation and native MCP APIs have none (every request
+            failed with HTTP 500 when it was included).
+  FILLED  : nothing; settings come from named values used by the fragments.
+  DETAILS : docs/POLICIES.md
+-->
+<policies>
+  <inbound>
+    <base />
+    <!-- Backend headers: same governance as the working setup (strip spoofable
+         headers, X-MCP-Readonly / X-MCP-Toolsets from named values). -->
+    <include-fragment fragment-id="mcp-backend-headers" />
+    <!-- Caller: variables caller-oid and caller-app-id from the token claims. -->
+    <include-fragment fragment-id="mcp-caller-identity" />
+    <!-- Telemetry (AppTraces step native-inbound): method, path, whether a token
+         was sent and the client app id. -->
+    <trace source="ado-mcp-native" severity="information">
+      <message>@("native inbound: " + context.Request.Method + " " + context.Request.OriginalUrl.Path + " auth=" + (context.Request.Headers.ContainsKey("Authorization") ? "bearer" : "none"))</message>
+      <metadata name="step" value="native-inbound" />
+      <metadata name="clientAppId" value="@((string)context.Variables[&quot;caller-app-id&quot;])" />
+    </trace>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+    <!-- Cache-Control: no-store and x-apim-request-id, the CorrelationId in
+         ApiManagementGatewayLogs (fragment). -->
+    <include-fragment fragment-id="mcp-response-headers" />
+    <!-- Telemetry (AppTraces step native-outbound): status code only. A 401 here
+         carries the challenge APIM rewrote to the gateway. -->
+    <trace source="ado-mcp-native" severity="information">
+      <message>@("native outbound: " + context.Response.StatusCode + (context.Response.StatusCode == 401 ? ", APIM rewrote resource_metadata to the gateway" : ""))</message>
+      <metadata name="step" value="native-outbound" />
+      <metadata name="statusCode" value="@(context.Response.StatusCode.ToString())" />
+    </trace>
+  </outbound>
+  <on-error>
+    <base />
+    <!-- Same headers on errors, so failed calls stay traceable. -->
+    <include-fragment fragment-id="mcp-response-headers" />
+  </on-error>
+</policies>

@@ -1,0 +1,50 @@
+<!--
+  FRAGMENT : mcp-org-validation (infra/policies/fragments/org-validation.xml)
+  PURPOSE  : Reads the Azure DevOps organization from the URL and rejects a
+             malformed or not allowed one with 404 before anything else runs.
+  USED BY  : proxy-mcp.xml (inbound) and oauth-prm.xml (inbound).
+  INPUT    : URL template parameter {org} (absent on the bare endpoints).
+             Variable org-404-body (optional): "json" answers 404 with
+             {"error":"unknown_organization"}; unset answers an empty 404.
+             Named value mcp-allowed-organizations: comma-separated allow-list,
+             "*" accepts any well-formed name.
+  OUTPUT   : Variable org (empty string when the URL has no organization).
+             Variable org-rejected (bool). A 404 response when rejected.
+  WHY      : The proxy and its metadata must accept exactly the same
+             organizations, or a client could get metadata for a URL the proxy
+             then refuses. One fragment keeps the rule in one place, and the
+             allow-list is a named value you can change without redeploying.
+  DETAILS  : docs/POLICIES.md
+-->
+<fragment>
+  <!-- Organization from the URL template /{org}; empty on the bare endpoint. -->
+  <set-variable name="org" value="@(context.Request.MatchedParameters.GetValueOrDefault(&quot;org&quot;, &quot;&quot;))" />
+  <!-- The regex blocks path tricks (dots, slashes, encoded characters); the
+       named value holds the allow-list. Empty org is not rejected: the bare
+       endpoint takes orgName per tool call. -->
+  <set-variable name="org-rejected" value="@{
+    var org = (string)context.Variables[&quot;org&quot;];
+    if (org.Length == 0) { return false; }
+    if (!Regex.IsMatch(org, &quot;^[A-Za-z0-9][A-Za-z0-9_-]{0,49}$&quot;)) { return true; }
+    var allowed = &quot;{{mcp-allowed-organizations}}&quot;;
+    return allowed != &quot;*&quot; &amp;&amp; !allowed.Split(',').Contains(org, StringComparer.OrdinalIgnoreCase);
+  }" />
+  <!-- Two answers so each caller keeps its exact response: the MCP proxy
+       returns a JSON error, the metadata endpoint an empty 404. -->
+  <choose>
+    <when condition="@((bool)context.Variables[&quot;org-rejected&quot;] &amp;&amp; context.Variables.GetValueOrDefault&lt;string&gt;(&quot;org-404-body&quot;, &quot;&quot;) == &quot;json&quot;)">
+      <return-response>
+        <set-status code="404" reason="Not Found" />
+        <set-header name="Content-Type" exists-action="override">
+          <value>application/json</value>
+        </set-header>
+        <set-body>{"error":"unknown_organization"}</set-body>
+      </return-response>
+    </when>
+    <when condition="@((bool)context.Variables[&quot;org-rejected&quot;])">
+      <return-response>
+        <set-status code="404" reason="Not Found" />
+      </return-response>
+    </when>
+  </choose>
+</fragment>

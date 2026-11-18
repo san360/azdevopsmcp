@@ -1,0 +1,194 @@
+{
+  "tenantId": "00000000-0000-0000-0000-000000000000",
+  "clientId": "00000000-0000-0000-0000-000000000000",
+  "scope": "https://mcp.dev.azure.com/.default",
+  "tool": {
+    "name": "core_list_projects",
+    "arguments": {
+      "top": 5
+    }
+  },
+  "targets": [
+    {
+      "name": "origin",
+      "url": "https://mcp.dev.azure.com/example-organization",
+      "description": "Hosted server, organization URL (documented form).",
+      "expectFailures": [
+        "client: Entra authorize request"
+      ]
+    },
+    {
+      "name": "origin-bare",
+      "url": "https://mcp.dev.azure.com",
+      "description": "Hosted server, bare URL; the organization is passed per tool call.",
+      "toolArguments": {
+        "orgName": "example-organization"
+      }
+    },
+    {
+      "name": "apim-native",
+      "url": "https://example-gateway.azure-api.net/ado-mcp-native/example-organization",
+      "description": "Regular setup: APIM native MCP pass-through (no tool validation possible).",
+      "expectFailures": [
+        "client: Entra authorize request"
+      ],
+      "toolValidation": "none"
+    },
+    {
+      "name": "apim-proxy",
+      "url": "https://example-gateway.azure-api.net/ado-mcp-proxy/example-organization",
+      "description": "Working setup: APIM HTTP proxy + OAuth compatibility + tool validation.",
+      "toolValidation": "enforced"
+    },
+    {
+      "name": "apim-proxy-bare",
+      "url": "https://example-gateway.azure-api.net/ado-mcp-proxy",
+      "description": "Working setup without an organization: pass orgName per tool call.",
+      "toolArguments": {
+        "orgName": "example-organization"
+      }
+    }
+  ],
+  "validationCases": [
+    {
+      "name": "core_list_projects valid",
+      "tool": "core_list_projects",
+      "arguments": {
+        "top": 5
+      },
+      "expect": "pass"
+    },
+    {
+      "name": "core_list_projects top wrong type",
+      "tool": "core_list_projects",
+      "arguments": {
+        "top": "5"
+      },
+      "expect": "reject",
+      "field": "top"
+    },
+    {
+      "name": "core_list_projects top out of range",
+      "tool": "core_list_projects",
+      "arguments": {
+        "top": 500
+      },
+      "expect": "reject",
+      "field": "top"
+    },
+    {
+      "name": "core_list_projects stateFilter bad enum",
+      "tool": "core_list_projects",
+      "arguments": {
+        "stateFilter": "everything"
+      },
+      "expect": "reject",
+      "field": "stateFilter"
+    },
+    {
+      "name": "core_list_projects unknown property",
+      "tool": "core_list_projects",
+      "arguments": {
+        "top": 5,
+        "query": "x"
+      },
+      "expect": "reject",
+      "field": "query"
+    },
+    {
+      "name": "core_list_projects out of range (MCP 2025-11-25 isError)",
+      "tool": "core_list_projects",
+      "arguments": {
+        "top": 500
+      },
+      "expect": "reject",
+      "field": "top",
+      "protocolVersion": "2025-11-25"
+    },
+    {
+      "name": "wit_work_item valid",
+      "tool": "wit_work_item",
+      "arguments": {
+        "action": "my",
+        "project": "example-project",
+        "type": "assignedtome"
+      },
+      "expect": "pass"
+    },
+    {
+      "name": "wit_work_item missing required action",
+      "tool": "wit_work_item",
+      "arguments": {},
+      "expect": "reject",
+      "field": "action"
+    },
+    {
+      "name": "wit_work_item action bad enum",
+      "tool": "wit_work_item",
+      "arguments": {
+        "action": "delete"
+      },
+      "expect": "reject",
+      "field": "action"
+    },
+    {
+      "name": "wit_work_item id wrong type",
+      "tool": "wit_work_item",
+      "arguments": {
+        "action": "get",
+        "id": "12"
+      },
+      "expect": "reject",
+      "field": "id"
+    },
+    {
+      "name": "wit_work_item id out of range",
+      "tool": "wit_work_item",
+      "arguments": {
+        "action": "get",
+        "id": 0
+      },
+      "expect": "reject",
+      "field": "id"
+    },
+    {
+      "name": "wit_work_item get without id",
+      "tool": "wit_work_item",
+      "arguments": {
+        "action": "get"
+      },
+      "expect": "reject",
+      "field": "id"
+    },
+    {
+      "name": "wit_work_item unknown property",
+      "tool": "wit_work_item",
+      "arguments": {
+        "action": "my",
+        "project": "example-project",
+        "wiql": "SELECT"
+      },
+      "expect": "reject",
+      "field": "wiql"
+    },
+    {
+      "name": "core_list_projects name in other case",
+      "tool": "CORE_LIST_PROJECTS",
+      "arguments": {
+        "top": 500
+      },
+      "expect": "reject",
+      "field": "params.name"
+    },
+    {
+      "name": "core_list_projects inside a JSON-RPC batch",
+      "tool": "core_list_projects",
+      "arguments": {
+        "top": 500
+      },
+      "expect": "reject",
+      "field": "request",
+      "batch": true
+    }
+  ]
+}

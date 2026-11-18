@@ -1,0 +1,12 @@
+// Application Insights (workspace-based): every gateway request of one probe run.
+// Paste the run id printed by tools/mcp_probe.py ("x-mcp-test-run").
+let runId = "<run-id>";
+AppRequests
+| where TimeGenerated > ago(1d)
+| where tostring(Properties["Request-x-mcp-test-run"]) == runId
+| extend apimRequestId = tostring(Properties["Response-x-apim-request-id"]),
+         mcpMethod = tostring(Properties["gen_ai.operation.name"]),
+         auth = tostring(Properties["auth.type"]),
+         wwwAuthenticate = tostring(Properties["Response-WWW-Authenticate"])
+| project TimeGenerated, Name, ResultCode, DurationMs, mcpMethod, auth, apimRequestId, OperationId, wwwAuthenticate
+| order by TimeGenerated asc
