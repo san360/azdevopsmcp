@@ -32,7 +32,11 @@ New to the lab? Deploy it first with [GETTING-STARTED.md](GETTING-STARTED.md). T
    resource/scope only once it knows the user's tenant. When the authorization server is
    on the gateway host, it also checks **isolation**: issuer, `authorize`, `token` and
    `register` must all be under the MCP URL's first path segment (`/ado-mcp-proxy/...`), so
-   the working setup never claims routes at the gateway root.
+   the working setup never claims routes at the gateway root. For every target it also
+   checks that the challenge URL, PRM `resource`, authorization servers and OAuth endpoints
+   are on the **host the client connected to** (or Entra): behind a reverse proxy a backend
+   host such as `*.azure-api.net` there means the proxy did not preserve `Host`
+   ([APP-GATEWAY.md](APP-GATEWAY.md#why-the-host-name-matters)).
 3. **mcp**: with a token, `initialize` → `notifications/initialized` → `tools/list` → `tools/call core_list_projects`.
 4. **validation**: with a token, every `validationCases` entry against targets marked
    `toolValidation`. No target enforces validation any more, so the invalid cases print
@@ -201,6 +205,23 @@ INFO   apim-proxy   validation: core_list_projects top out of range: not validat
 ```powershell
 python tools/mcp_probe.py --config tools/probe.local.json --token az --only apim-proxy --only apim-native
 ```
+
+## 6. Behind Application Gateway
+
+With the optional edge ([APP-GATEWAY.md](APP-GATEWAY.md)), add targets for the public host
+to `tools/probe.local.json`, for example `agw-proxy` (`https://<host>/ado-mcp-proxy/<org>`),
+`agw-proxy-bare` (`https://<host>/ado-mcp-proxy`) and `agw-native`
+(`https://<host>/ado-mcp-native/<org>`, `expectFailures` like `apim-native`), then:
+
+```powershell
+python tools/mcp_probe.py --config tools/probe.local.json --token az --only agw-proxy --only agw-proxy-bare --only agw-native --skip-validation
+```
+
+Expected: the same results as on the plain gateway, and *discovery: URLs on the client's
+host* passes for every target. App Gateway's own view of each request:
+[`docs/kql/appgw-access.kql`](kql/appgw-access.kql). The routing, streaming, timeout and
+rate-limit tests and their results are in
+[APP-GATEWAY.md, section 13](APP-GATEWAY.md#13-test-results).
 
 ## Troubleshooting
 

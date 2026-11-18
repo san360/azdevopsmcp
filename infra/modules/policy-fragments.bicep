@@ -7,6 +7,8 @@
 //   mcp-caller-identity    proxy-mcp.xml, native-mcp.xml            -
 //   mcp-backend-headers    proxy-mcp.xml, native-mcp.xml            mcp-readonly, mcp-toolsets
 //   mcp-response-headers   proxy-mcp.xml, native-mcp.xml, oauth-token.xml
+//   (no fragment)          proxy-mcp.xml rate limit                 mcp-trust-forwarded-for, mcp-rate-limit-key
+//   (no fragment)          oauth-prm.xml, oauth-as-metadata.xml      mcp-trust-forwarded-for (X-Forwarded-Host)
 
 param apimName string
 
@@ -18,6 +20,16 @@ param readOnly bool
 
 @description('Comma-separated X-MCP-Toolsets; empty sends no header.')
 param toolsets string
+
+@description('Behind a reverse proxy (Application Gateway): client IP from the last X-Forwarded-For entry, metadata host from the last X-Forwarded-Host.')
+param trustForwardedFor bool = false
+
+@description('Rate-limit key of the working setup: client-ip, or user (token oid; pair with token validation).')
+@allowed([
+  'client-ip'
+  'user'
+])
+param rateLimitKey string = 'client-ip'
 
 resource apim 'Microsoft.ApiManagement/service@2024-05-01' existing = {
   name: apimName
@@ -36,6 +48,14 @@ var namedValues = [
   {
     name: 'mcp-toolsets'
     value: empty(toolsets) ? '*' : toolsets
+  }
+  {
+    name: 'mcp-trust-forwarded-for'
+    value: trustForwardedFor ? 'true' : 'false'
+  }
+  {
+    name: 'mcp-rate-limit-key'
+    value: rateLimitKey
   }
 ]
 

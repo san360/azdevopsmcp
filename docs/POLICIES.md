@@ -399,7 +399,8 @@ The policy of the MCP server `ado-mcp-proxy` (APIM → *APIs → MCP servers*, d
 
 - checks HTTPS and the organization name (allow-list);
 - sets a correlation ID and records the MCP method and the caller for telemetry;
-- rate-limits per client IP;
+- rate-limits per client IP (behind a reverse proxy: the IP the proxy appended to
+  `X-Forwarded-For`, or optionally per user);
 - sets the server-side tool restriction headers `X-MCP-Readonly` and `X-MCP-Toolsets`, and
   removes request headers a client could spoof;
 - adds response headers for support.
@@ -457,9 +458,14 @@ DevOps tools then need an `orgName` argument. One deployment serves many organiz
    organization, `auth=bearer|none`, correlation ID, the user's object ID (`caller-oid`) and
    the client app ID (`caller-app-id`). The token is decoded only to read these claims; it
    is not validated here and never logged.
-7. **`rate-limit-by-key`**: at most `RATE_LIMIT_CALLS` calls per `RATE_LIMIT_PERIOD` seconds
-   per client IP, then `429` with `Retry-After`. This protects the backend and the user's
-   Azure DevOps request budget.
+7. **`set-variable client-ip`, `rate-limit-by-key`**: at most `RATE_LIMIT_CALLS` calls per
+   `RATE_LIMIT_PERIOD` seconds per client IP, then `429` with `Retry-After`. This protects
+   the backend and the user's Azure DevOps request budget. The client IP is the TCP peer;
+   when `{{mcp-trust-forwarded-for}}` is `true` (behind Application Gateway) it is the
+   **last** `X-Forwarded-For` entry without the port, the one the proxy appended, so
+   clients cannot forge it. With `{{mcp-rate-limit-key}}` = `user` the key is the token's
+   `oid` (client IP without a token); the token is not validated here, so pair that with
+   `validate-azure-ad-token` ([APP-GATEWAY.md](APP-GATEWAY.md#8-rate-limiting-behind-a-proxy)).
 8. **Fragment `mcp-backend-headers`**: `X-MCP-Readonly: true` when `{{mcp-readonly}}` is
    `true`, and `X-MCP-Toolsets: <list>` when `{{mcp-toolsets}}` is not `*` (the server then
    only offers those tool groups). Before that it deletes `Forwarded`, `X-Forwarded-*`,
@@ -634,7 +640,11 @@ Runs on the plain API `ado-mcp-proxy-prm` (path
 4. **`<return-response>`** `200`:
    - `resource` = request scheme + host + `/` + `PROXY_PATH` (+ `/` + organization when the
      URL has one). Both URL shapes (challenge URL and alias) give the same document. The
-     host comes from the request, so custom domains work.
+     host comes from the request, so custom domains work. When
+     `{{mcp-trust-forwarded-for}}` is `true`, a well-formed last `X-Forwarded-Host` entry
+     replaces it (a proxy that sends APIM another host,
+     [APP-GATEWAY.md](APP-GATEWAY.md#9-alternative-no-custom-domain-on-apim)); the same
+     rule applies to the issuer in `oauth-as-metadata.xml`.
    - `authorization_servers` = `[ scheme + host + "/" + OAUTH_PATH ]`.
    - `bearer_methods_supported` = `["header"]`, `scopes_supported` = `[SCOPE]`,
      `resource_name` for display.

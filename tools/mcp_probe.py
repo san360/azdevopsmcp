@@ -247,6 +247,18 @@ def fetch_authorization_metadata(issuer: str) -> dict[str, Any] | None:
 
 
 OAUTH_ENDPOINT_KEYS = ("issuer", "authorization_endpoint", "token_endpoint", "registration_endpoint")
+ENTRA_HOSTS = ("login.microsoftonline.com",)
+
+
+def foreign_host_urls(mcp_url: str, urls: list[Any]) -> list[str]:
+    """URLs on neither the MCP URL's host nor Microsoft Entra.
+
+    Behind a reverse proxy (Application Gateway) every URL the gateway advertises must use the
+    host the client connected to; a backend host (for example *.azure-api.net) there means the
+    proxy did not preserve the Host header and clients reject the metadata or cannot reach it.
+    """
+    host = urllib.parse.urlsplit(mcp_url).netloc.lower()
+    return [u for u in urls if isinstance(u, str) and urllib.parse.urlsplit(u).netloc.lower() not in (host, *ENTRA_HOSTS)]
 
 
 def oauth_isolation(mcp_url: str, meta: dict[str, Any]) -> tuple[bool | None, str]:
@@ -355,6 +367,9 @@ class Probe:
         self._add(name, "discovery: advertised PRM", True,
                   f"resource={prm.get('resource')} scopes={prm.get('scopes_supported')} "
                   f"as={prm.get('authorization_servers')}")
+        foreign = foreign_host_urls(url, [metadata_url, prm.get("resource"), *(prm.get("authorization_servers") or [])])
+        self._add(name, "discovery: URLs on the client's host", not foreign,
+                  "other host: " + ", ".join(foreign) if foreign else f"all on {urllib.parse.urlsplit(url).netloc}")
         return prm
 
     def client_auth(self, name: str, url: str, advertised_prm: dict[str, Any] | None) -> None:
@@ -386,6 +401,9 @@ class Probe:
                 client_id, how_client = registered["client_id"], "dynamic client registration"
         self._add(name, "client: authorization server metadata", True,
                   f"issuer={meta.get('issuer')} client_id via {how_client}")
+        foreign = foreign_host_urls(url, [meta.get(key) for key in OAUTH_ENDPOINT_KEYS])
+        if foreign:
+            self._add(name, "client: OAuth endpoints on the client's host", False, "other host: " + ", ".join(foreign))
         isolated, why = oauth_isolation(url, meta)
         if isolated is not None:
             # Gateway-hosted OAuth must not claim routes outside this setup's dedicated path.

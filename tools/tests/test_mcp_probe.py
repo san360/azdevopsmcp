@@ -53,6 +53,14 @@ class ParsingTests(unittest.TestCase):
         message = probe.parse_jsonrpc(body, "text/event-stream", 7)
         self.assertEqual(message["result"], {"ok": True})
 
+    def test_foreign_host_urls_flag_backend_hosts(self):
+        mcp = "https://mcp.example.com/ado-mcp-proxy/org"
+        urls = ["https://mcp.example.com/ado-mcp-proxy/.well-known/oauth-protected-resource/org",
+                "https://login.microsoftonline.com/tenant/v2.0",
+                "https://gw.azure-api.net/ado-mcp-proxy/org", None]
+        self.assertEqual(probe.foreign_host_urls(mcp, urls), ["https://gw.azure-api.net/ado-mcp-proxy/org"])
+        self.assertEqual(probe.foreign_host_urls("https://MCP.example.com/x", ["https://mcp.example.com/y"]), [])
+
     def test_json_body(self):
         self.assertIsNone(probe.parse_jsonrpc('{"jsonrpc":"2.0","id":1}', "application/json", 2))
         self.assertEqual(probe.parse_jsonrpc('{"jsonrpc":"2.0","id":2,"result":{}}', "application/json", 2)["id"], 2)

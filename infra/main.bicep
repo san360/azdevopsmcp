@@ -42,6 +42,16 @@ param rateLimitCalls int = 60
 @minValue(1)
 param rateLimitPeriod int = 60
 
+@description('Behind a reverse proxy such as Application Gateway: rate-limit by the client IP in the last X-Forwarded-For entry (the one the proxy appended), and build PRM/OAuth metadata URLs from the last X-Forwarded-Host. Keep false when clients reach APIM directly, because clients could then set these headers.')
+param trustForwardedFor bool = false
+
+@description('Working setup rate-limit key: client-ip, or user (the token oid; a caller can invent oids unless the gateway validates tokens).')
+@allowed([
+  'client-ip'
+  'user'
+])
+param rateLimitKey string = 'client-ip'
+
 @description('Request body bytes logged for MCP JSON-RPC calls (0 disables). Response bodies are never logged.')
 @minValue(0)
 @maxValue(8192)
@@ -135,6 +145,8 @@ module fragments 'modules/policy-fragments.bicep' = {
     allowedOrganizations: allowedOrganizations
     readOnly: readOnly
     toolsets: toolsets
+    trustForwardedFor: trustForwardedFor
+    rateLimitKey: rateLimitKey
   }
   dependsOn: [
     apimService

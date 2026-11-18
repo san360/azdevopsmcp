@@ -21,8 +21,9 @@
             enforces it). Pointing authorization_servers at the gateway lets APIM
             translate the RFC 8707 resource before Entra sees it (AADSTS9010010
             otherwise). The issuer has a path, so nothing of this setup sits at
-            the gateway root. The origin comes from the request, so custom
-            domains work.
+            the gateway root. The origin comes from the request (or, behind a
+            trusted reverse proxy, the last X-Forwarded-Host), so custom domains
+            and proxies that rewrite Host both work.
   VERIFY  : AppTraces step prm (docs/kql/policy-traces.kql,
             docs/kql/client-signins.kql).
   FILLED  : by fill() in infra/modules/mcp-proxy.bicep (SCOPE, PROXY_PATH,
@@ -61,7 +62,13 @@
       </set-header>
       <set-body>@{
         var url = context.Request.OriginalUrl;
-        var origin = url.Scheme + Uri.SchemeDelimiter + url.Host;
+        var host = url.Host;
+        if ("{{mcp-trust-forwarded-for}}" == "true") {
+          var hosts = context.Request.Headers.GetValueOrDefault("X-Forwarded-Host", "").Split(',');
+          var forwarded = hosts[hosts.Length - 1].Trim();
+          if (Regex.IsMatch(forwarded, "^[A-Za-z0-9.-]+(:[0-9]{1,5})?$")) { host = forwarded; }
+        }
+        var origin = url.Scheme + Uri.SchemeDelimiter + host;
         var org = (string)context.Variables["org"];
         var prm = new JObject();
         prm["resource"] = origin + "/__PROXY_PATH__" + (org.Length == 0 ? "" : "/" + org);
