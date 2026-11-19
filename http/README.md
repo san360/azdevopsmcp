@@ -108,9 +108,9 @@ app. A missing redirect URI shows up only after sign-in, as `AADSTS50011`.
    for file 03 `agwHost` and `agwHost2` (the App Gateway hosts, `https://...`). Put
    tokens in `http-client.private.env.json`. Both files are git-ignored; never commit
    real values.
-   For REST Client, put the same values under `rest-client.environmentVariables.lab` in
-   `.vscode/settings.json` (also git-ignored), and select the environment `lab`
-   (**Rest Client: Switch Environment**).
+   REST Client does not read these files: put the same values in `.vscode/settings.json`
+   (also git-ignored). Then select the environment `lab`, see
+   [Select the environment](#select-the-environment).
 3. Tokens (they expire after about an hour):
 
    ```powershell
@@ -132,6 +132,52 @@ Remove-Item 02.httpyac.tmp.http
 
 Without the conversion, httpyac stops at step 3 with *Cannot read properties of undefined
 (reading 'body')*.
+
+## Select the environment
+
+The files contain no hosts or IDs: `{{gateway}}`, `{{org}}`, `{{clientId}}`, `{{agwHost}}`,
+`{{token}}` and the others come from the **environment** you select. Until one is selected
+the variables stay unresolved, and the first request fails (the URL still contains
+`{{gateway}}`). The example file has one environment, `lab`.
+
+| Tool | Where the values come from | How to select `lab` |
+|---|---|---|
+| VS Code **REST Client** | `rest-client.environmentVariables` in `.vscode/settings.json` (does **not** read `http-client.env.json`) | `Ctrl+Alt+E`, or **F1 → Rest Client: Switch Environment**, then `lab`. The status bar (bottom right) shows the active environment; *No Environment* means none |
+| VS Code **httpYac** | `http-client.env.json` and `http-client.private.env.json` next to the `.http` file (also `httpyac.environmentVariables` in settings) | **F1 → httpYac: Select Environment** (or **Toggle Environment**), or click the environment item in the status bar. To preselect it: `"httpyac.environmentSelectedOnStart": ["lab"]` |
+| **httpyac CLI** | the same files | `--env lab`; `--var token=...` overrides one value for that run |
+| JetBrains **HTTP Client** | `http-client.env.json` and `http-client.private.env.json` | The **Run with** environment list at the top of the `.http` editor, then `lab` |
+
+REST Client settings (keys as in `http-client.env.example.json`; `$shared` values apply to
+every environment):
+
+```json
+{
+  "rest-client.environmentVariables": {
+    "$shared": {},
+    "lab": {
+      "gateway": "https://<gateway-host>",
+      "org": "<organization>",
+      "tenant": "<tenant-id>",
+      "clientId": "<public-client-id>",
+      "agwHost": "https://<host>",
+      "agwHost2": "https://<host2>",
+      "token": "<az account get-access-token --scope https://mcp.dev.azure.com/.default>"
+    }
+  }
+}
+```
+
+**More than one target.** Add an environment per target, with the same keys, and switch
+between them instead of editing the files. For example, `agw` with
+`"gateway": "https://<host>"` runs file 02 unchanged through Application Gateway (every
+path it calls is routed, [APP-GATEWAY.md section 6](../docs/APP-GATEWAY.md#6-routing)).
+File 03 needs `agwHost` and `agwHost2` in the selected environment, and App Gateway must
+be running.
+
+**Refresh the token.** `token` expires after about an hour. Update it in the file you use
+(settings for REST Client, `http-client.private.env.json` for the others), or pass it with
+`--var` on the CLI. An expired token gives `401` on the MCP calls even with an environment
+selected.
 
 ## The manual steps (file 02, steps 5 and 6)
 
