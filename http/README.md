@@ -9,6 +9,7 @@ and **where** to find it in the logs.
 |---|---|
 | [`01-not-working-native.http`](01-not-working-native.http) | Native APIM MCP pass-through. Sign-in ends at step 5 with `AADSTS9010010`; the MCP calls work with a token from elsewhere |
 | [`02-working-proxy.http`](02-working-proxy.http) | The working setup, from the anonymous call to a successful `tools/call`, including the gateway's PRM under `/ado-mcp-proxy/.well-known/...` and its `register`, `authorize` and `token` under `/ado-mcp-proxy/oauth` |
+| [`03-app-gateway.http`](03-app-gateway.http) | The working setup behind Application Gateway with APIM internal ([APP-GATEWAY.md](../docs/APP-GATEWAY.md)): the same sign-in on a custom host that APIM also has, then on a host only App Gateway has (challenge rewrite, `X-Forwarded-Host`), and what App Gateway blocks |
 | [`04-ai-gateway.http`](04-ai-gateway.http) | Azure AI Gateway: no discovery, a gateway token, and the on-behalf-of exchange ([AI-GATEWAY.md](../docs/AI-GATEWAY.md)) |
 
 ## Native vs. working, step by step
@@ -26,6 +27,71 @@ The step numbers are the same in files 01 and 02, so you can see exactly where t
 | 7–10 `initialize`, `notifications/initialized`, `tools/list`, `tools/call` | Work with a token obtained outside MCP | Work with the token from step 6 (or the same shortcut token) |
 | 11 Out-of-range `tools/call` (`top: 500`) | Accepted by the server | Accepted by the server too: no gateway validation ([TOOL-VALIDATION.md](../docs/TOOL-VALIDATION.md)) |
 
+## Plain gateway vs. Application Gateway (file 03)
+
+The sign-in is the same; only who makes the URLs right changes. Steps A1–A8 of file 03
+follow steps 1–7 and 10 of file 02.
+
+| Step | Plain gateway (02) | `<host>`: custom host on App Gateway and APIM (03, part A) | `<host2>`: custom domain only on App Gateway (03, part B) |
+|---|---|---|---|
+| Host APIM sees | `<apim-name>.azure-api.net` | `<host>` (App Gateway forwards it) | `<apim-name>.azure-api.net`, public host in `X-Forwarded-Host` |
+| `401` `resource_metadata` | built by APIM from the host | built by APIM from the host, already public | built by APIM with the internal host, **rewritten by App Gateway** to `<host2>` |
+| PRM, OAuth metadata | from the host | from the host | from `X-Forwarded-Host` (`trustForwardedFor = true`) |
+| `register`, `authorize`, `token` | APIM policies | same policies, through App Gateway | same |
+| Sign-in page | Entra, directly in the browser | same: App Gateway is not on the Entra path | same |
+| Paths reachable | every API on the instance | MCP paths only; others `502` (part C) | same |
+| Regular setup (`ado-mcp-native`) | fails at Entra, `AADSTS9010010` | same | fails earlier: its PRM names the internal host (C4) |
+
+## Client registration (DCR) and the Entra app
+
+**Why DCR.** The MCP authorization spec (2025-06-18) says clients SHOULD register
+themselves through dynamic client registration ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)):
+`POST <registration_endpoint>` with a name and redirect URIs, and they get a `client_id`
+back. Claude Code, Codex, MCP Inspector, VS Code and Copilot CLI all do this when the
+authorization-server metadata has a `registration_endpoint`. Several stop without one
+(*Incompatible auth server: does not support dynamic client registration*, *Dynamic
+registration failed: HTTP 404*).
+
+**Why Entra cannot serve it.** Microsoft Entra has no registration endpoint. Apps are
+created by an administrator, not by the client at sign-in.
+
+**How the working setup handles it.** The gateway publishes its own
+`registration_endpoint` (`/ado-mcp-proxy/oauth/register`). `oauth-register.xml` answers
+every client with `201` and the **same pre-registered Entra public client ID** (deployment
+parameter `publicClientId`, created by `scripts/setup-entra.ps1`). It echoes the
+`redirect_uris` the client sent and issues no secret (`token_endpoint_auth_method: none`;
+PKCE protects the code). Nothing is created in Entra. Entra still checks at sign-in that
+the client's redirect URI is registered on that app.
+Details: [CLIENTS-APIM-CHANGES.md, change 3](../docs/CLIENTS-APIM-CHANGES.md#change-3-a-registration-desk-that-hands-out-one-pre-registered-client)
+and [change 8](../docs/CLIENTS-APIM-CHANGES.md#change-8-the-entra-public-client-allows-each-clients-redirect-uri).
+
+**Which app.** Step 4 of file 02 (A4/B4 of file 03) shows it as `client_id`; it equals
+`clientId` in your environment file. Check it with:
+
+```powershell
+az ad app show --id <public-client-id> --query "{name:displayName, publicClient:isFallbackPublicClient, redirectUris:publicClient.redirectUris}"
+```
+
+| Entra object | What it is | Who uses it |
+|---|---|---|
+| Public client (default name `ado-mcp-apim-client`) | Single-tenant app, *Allow public client flows* on, no secret or certificate, platform *Mobile and desktop* with loopback redirect URIs; delegated permission **Azure DevOps MCP / `Ado.Mcp.Tools`** with admin consent | Handed out by `/register`; the `client_id` (`azp`) of every token obtained through the working setup |
+| Azure DevOps MCP enterprise application (app ID `2a72489c-aab2-4b65-b93a-a91edccf33b8`) | Microsoft's resource app; audience of the token (`https://mcp.dev.azure.com`) | Must exist as a service principal in the tenant (`setup-entra.ps1` step 1) |
+
+**Entra changes for Application Gateway.** None to the app's type, permission or consent:
+the browser goes to Entra directly, and the gateway replaces `resource` with
+`https://mcp.dev.azure.com`, so Entra never sees a gateway host name. Redirect URIs are
+loopback addresses on the user's machine, the same for every host. The only per-host
+entries are **OpenAI Codex**'s, `http://127.0.0.1/callback/<id>`, where `<id>` is derived
+from the exact MCP URL. Add one per new URL:
+
+```powershell
+./scripts/setup-entra.ps1 -TenantId <tenant-id> -AppName <existing-app-name> `
+  -McpUrl https://<host>/ado-mcp-proxy/<org>, https://<host>/ado-mcp-proxy, https://<host2>/ado-mcp-proxy/<org>, https://<host2>/ado-mcp-proxy
+```
+
+Pass `-AppName` with the existing app's display name, otherwise the script creates a new
+app. A missing redirect URI shows up only after sign-in, as `AADSTS50011`.
+
 ## Set up
 
 1. Install one of:
@@ -38,7 +104,8 @@ The step numbers are the same in files 01 and 02, so you can see exactly where t
    - JetBrains **HTTP Client**: the request format, `###` separators and
      `http-client.env.json` are the same; chaining needs a response handler script.
 2. Copy `http-client.env.example.json` to `http-client.env.json` and fill in `gateway`,
-   `org`, `tenant` and `clientId` (outputs of the deployment and `setup-entra.ps1`). Put
+   `org`, `tenant` and `clientId` (outputs of the deployment and `setup-entra.ps1`), and
+   for file 03 `agwHost` and `agwHost2` (the App Gateway hosts, `https://...`). Put
    tokens in `http-client.private.env.json`. Both files are git-ignored; never commit
    real values.
    For REST Client, put the same values under `rest-client.environmentVariables.lab` in
@@ -106,3 +173,10 @@ re-run on the current layout (working setup as an APIM MCP server, OAuth under
 `/ado-mcp-proxy/oauth`) on 2026-11-18 with the conversion above: all 11 requests answered as
 documented (`401`, `200`, `200`, `201`, `302`, step 6 `400 invalid_grant` with the
 placeholder code, then `200`, `202`, `200`, `200`, `200`).
+
+File 03 was run through both App Gateway hosts on 2026-11-19 with the same conversion: all
+18 requests answered as documented. Part A: `401`, `200`, `200`, `201`, `302` with
+`resource=https%3A%2F%2Fmcp.dev.azure.com`, A6 `400 invalid_grant` (`AADSTS9002313`,
+placeholder code), `200`, `200`. Part B: the same on `<host2>`, with the rewritten challenge
+and PRM/metadata on `<host2>`. Part C: the forged `X-Forwarded-Host` was ignored, `502`,
+`502`, and the native PRM named the internal `<apim-name>.azure-api.net` host.
