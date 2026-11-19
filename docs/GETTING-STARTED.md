@@ -208,7 +208,9 @@ sign-in fail with `AADSTS9010010`. That is the reported problem, reproduced.
 
 To see every request of the sign-in and MCP flow one by one, open the
 [`.http` walkthroughs](../http/README.md): `01-not-working-native.http` ends at the
-`AADSTS9010010` failure, `02-working-proxy.http` reaches a successful `tools/call`.
+`AADSTS9010010` failure, `02-working-proxy.http` reaches a successful `tools/call`, and
+`03-app-gateway.http` runs the same flow through Application Gateway
+([APP-GATEWAY.md](APP-GATEWAY.md)).
 
 ## 7. Look at the logs
 

@@ -323,6 +323,11 @@ Not deployed in the lab. If you need it (`appGatewaySku = 'WAF_v2'` plus a WAF p
 
 ## 11. Logs
 
+To replay the sign-in and MCP calls through both hosts request by request, with the
+expected response of each step, use
+[`http/03-app-gateway.http`](../http/03-app-gateway.http) (the client-registration and
+Entra details are in [`http/README.md`](../http/README.md#client-registration-dcr-and-the-entra-app)).
+
 App Gateway access logs go to the lab workspace (resource-specific table `AGWAccessLogs`):
 [`docs/kql/appgw-access.kql`](kql/appgw-access.kql). `BackendPoolName` shows the route
 (`apim` or `unrouted`), `HttpStatus` what the client got, `ServerStatus` what APIM returned,

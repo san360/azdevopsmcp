@@ -1,0 +1,290 @@
+# =====================================================================================
+#  03 - The working setup behind Application Gateway, APIM in internal mode
+#  https://{{agwHost}}/ado-mcp-proxy/{{org}}    and    https://{{agwHost2}}/ado-mcp-proxy/{{org}}
+#
+#  The same sign-in as 02-working-proxy.http, but the client only ever talks to Application
+#  Gateway on a custom domain. APIM has no public endpoint (docs/APP-GATEWAY.md).
+#
+#    client --TLS <host>--> App Gateway --(path rule: MCP paths only)--> APIM (internal) --> Azure DevOps
+#    browser ------------------------------------------------------------> Microsoft Entra ID
+#
+#  Two hosts on the same App Gateway and the same APIM instance (APP-GATEWAY.md section 9):
+#    {{agwHost}}   custom host ALSO configured on APIM. App Gateway sends Host: <host>, so APIM
+#                  builds every URL from the request host. Nothing is rewritten.     Part A
+#    {{agwHost2}}  custom domain ONLY on App Gateway. App Gateway sends
+#                  Host: <apim-name>.azure-api.net and X-Forwarded-Host: <host2>, and rewrites
+#                  that internal host to <host2> in the 401 challenge. The PRM and OAuth
+#                  policies take the host from X-Forwarded-Host (trustForwardedFor = true). Part B
+#  Part C shows what App Gateway does NOT let through.
+#
+#  Rule of the whole flow: every URL a client is given (resource_metadata, resource,
+#  authorization_servers, issuer, authorize/token/register endpoints) must be on the host
+#  the client connected to. A client cannot reach <apim-name>.azure-api.net (internal), and
+#  RFC 9728 section 3.3 makes it reject a PRM whose "resource" differs from its URL.
+#
+#  DCR and the Entra app: see "Client registration (DCR) and the Entra app" in http/README.md.
+#  Steps A5/A6 (browser, code) are manual, as in file 02; see http/README.md.
+#
+#  Variables (environment file): agwHost, agwHost2 (both https://...), org, clientId, token.
+#  App Gateway must be running: az network application-gateway start -g <rg> -n <app-gateway>
+# =====================================================================================
+
+# Fixed, lab-only PKCE pair (RFC 7636). Never reuse a fixed verifier in a real client.
+@codeVerifier = lab-only-pkce-verifier-0123456789-abcdefghijklmnopqrstuvwxyz
+@codeChallenge = zaFp8oSoZN9fqMAEJGn4XTBBL02a9LeZix3gER7YRB4
+@redirectUri = http://localhost
+@mcpUrl = {{agwHost}}/ado-mcp-proxy/{{org}}
+@mcpUrl2 = {{agwHost2}}/ado-mcp-proxy/{{org}}
+# Paste the "code" from the browser address bar after step A5 (manual, valid ~10 minutes).
+@authCode = paste-the-code-here
+# Token for the MCP calls. Default: the az token from your environment file. After a
+# successful step A6, use {{a6token.response.body.$.access_token}} instead.
+@bearer = {{token}}
+
+# -------------------------------------------------------------------------------------
+# PART A - <host>: custom host on App Gateway AND on APIM
+# -------------------------------------------------------------------------------------
+
+###
+# STEP A1 - Anonymous initialize
+# PATH  : App Gateway listener "https", rule "mcp" (path /ado-mcp-proxy/*) -> APIM pool,
+#         Host: <host> -> APIM MCP server ado-mcp-proxy -> Azure DevOps answers 401.
+# EXPECT: HTTP 401, no body:
+#           WWW-Authenticate: Bearer resource_metadata="https://<host>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>"
+#         APIM builds this URL from the Host header. App Gateway sent the public host, so
+#         the URL is already right; App Gateway does not touch it on this host.
+# LOGS  : appgw-access.kql (RuleName mcp, OriginalHost = Host = <host>, ServerStatus 401).
+# @name a1init
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough-agw","version":"1"}}}
+
+###
+# STEP A2 - Protected-resource metadata (API ado-mcp-proxy-prm, oauth-prm.xml)
+# EXPECT: HTTP 200
+#           { "resource": "https://<host>/ado-mcp-proxy/<org>",                     <- the URL the client used
+#             "authorization_servers": [ "https://<host>/ado-mcp-proxy/oauth" ],     <- the gateway, not Entra
+#             "scopes_supported": [ "https://mcp.dev.azure.com/.default" ], ... }
+#         Never <apim-name>.azure-api.net.
+# @name a2prm
+GET {{agwHost}}/ado-mcp-proxy/.well-known/oauth-protected-resource/{{org}}
+Accept: application/json
+
+###
+# STEP A3 - Authorization-server metadata, path-inserted alias (RFC 8414)
+# PATH  : /.well-known/oauth-authorization-server/ado-mcp-proxy/* is one of the alias paths
+#         App Gateway routes to APIM (APP-GATEWAY.md section 6). Codex, Claude Code and
+#         Copilot CLI fetch this address; without the route they cannot sign in.
+# EXPECT: HTTP 200
+#           { "issuer": "https://<host>/ado-mcp-proxy/oauth",
+#             "authorization_endpoint": "https://<host>/ado-mcp-proxy/oauth/authorize",
+#             "token_endpoint": "https://<host>/ado-mcp-proxy/oauth/token",
+#             "registration_endpoint": "https://<host>/ado-mcp-proxy/oauth/register", ... }
+# @name a3asMetadata
+GET {{agwHost}}/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth
+Accept: application/json
+
+###
+# STEP A4 - Dynamic client registration (oauth-register.xml)
+# WHY   : MCP clients register themselves (RFC 7591). Entra has no registration endpoint, so
+#         APIM answers every client with the SAME pre-registered Entra public client. Nothing
+#         is created in Entra; Entra still enforces the app's redirect URIs at sign-in.
+# EXPECT: HTTP 201
+#           { "client_id": "<public-client-id>", "redirect_uris": [ "http://localhost" ],
+#             "token_endpoint_auth_method": "none", ... }
+#         client_id equals {{clientId}} in your environment file, the same on every host:
+#         App Gateway changes nothing about the app registration.
+# @name a4register
+POST {{a3asMetadata.response.body.$.registration_endpoint}}
+Content-Type: application/json
+
+{"client_name":"http-walkthrough-agw","redirect_uris":["{{redirectUri}}"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}
+
+###
+# STEP A5 - Authorization request (oauth-authorize.xml)
+# WHY   : The client sends resource = its MCP URL. APIM drops it and adds
+#         resource=https://mcp.dev.azure.com, the identifier Entra accepts with the Azure
+#         DevOps scope. Without this, Entra answers AADSTS9010010.
+# EXPECT: HTTP 302, Location: https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize?client_id=<public-client-id>
+#           &redirect_uri=http%3A%2F%2Flocalhost&scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
+#           &code_challenge=...&code_challenge_method=S256&state=walkthrough-agw
+#           &resource=https%3A%2F%2Fmcp.dev.azure.com
+#         The browser goes straight to Entra. App Gateway is not on the sign-in path, and
+#         Entra does not need to know any gateway host name.
+# MANUAL: as file 02 step 5: open the Location in a browser, sign in, copy "code" from
+#         http://localhost/?code=...&state=walkthrough-agw into @authCode.
+# @name a5authorize
+# @no-redirect
+GET {{a3asMetadata.response.body.$.authorization_endpoint}}
+    ?client_id={{a4register.response.body.$.client_id}}
+    &response_type=code
+    &redirect_uri={{redirectUri}}
+    &scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
+    &resource={{mcpUrl}}
+    &code_challenge={{codeChallenge}}
+    &code_challenge_method=S256
+    &state=walkthrough-agw
+
+###
+# STEP A6 - Token request (oauth-token.xml)  [needs @authCode from step A5]
+# EXPECT: HTTP 200 with the user's access token for Azure DevOps MCP. With the placeholder
+#         code: 400 invalid_grant (AADSTS9002313), which still proves APIM reached Entra
+#         through App Gateway with resource replaced (not invalid_target / AADSTS9010010).
+# @name a6token
+POST {{a3asMetadata.response.body.$.token_endpoint}}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=authorization_code
+&client_id={{a4register.response.body.$.client_id}}
+&code={{authCode}}
+&redirect_uri={{redirectUri}}
+&code_verifier={{codeVerifier}}
+&resource={{mcpUrl}}
+
+###
+# STEP A7 - Authenticated initialize
+# EXPECT: HTTP 200, text/event-stream (data: {"result":{"serverInfo":{"name":"AzureDevOps.Mcp"...}}}).
+#         The first byte arrives as soon as Azure DevOps sends it: response buffering is
+#         off on App Gateway (APP-GATEWAY.md section 7).
+# @name a7initAuth
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough-agw","version":"1"}}}
+
+###
+# STEP A8 - tools/call (read-only)
+# EXPECT: HTTP 200, SSE with a project list.
+# LOGS  : appgw-access.kql (ClientIp = your IP); in APIM the rate limit uses the same IP,
+#         the last X-Forwarded-For entry (APP-GATEWAY.md section 8).
+# @name a8toolsCall
+POST {{mcpUrl}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":5}}}
+
+# -------------------------------------------------------------------------------------
+# PART B - <host2>: custom domain only on App Gateway, APIM on <apim-name>.azure-api.net
+# -------------------------------------------------------------------------------------
+
+###
+# STEP B1 - Anonymous initialize, challenge rewritten by App Gateway
+# PATH  : listener "https-2", rule "mcp-2" -> APIM with Host: <apim-name>.azure-api.net and
+#         X-Forwarded-Host: <host2> (rewrite set mcp-headers-2).
+# EXPECT: HTTP 401
+#           WWW-Authenticate: Bearer resource_metadata="https://<host2>/ado-mcp-proxy/.well-known/oauth-protected-resource/<org>"
+#         APIM generated https://<apim-name>.azure-api.net/...; App Gateway's response
+#         rewrite replaced that host with {var_host}. Without the rewrite the client would be
+#         sent to an internal host it cannot resolve (APP-GATEWAY.md section 13, negative test).
+# LOGS  : appgw-access.kql (RuleName mcp-2, OriginalHost <host2>, Host <apim-name>.azure-api.net).
+# @name b1init
+POST {{mcpUrl2}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"http-walkthrough-agw","version":"1"}}}
+
+###
+# STEP B2 - PRM built from X-Forwarded-Host
+# EXPECT: HTTP 200, "resource": "https://<host2>/ado-mcp-proxy/<org>",
+#         "authorization_servers": [ "https://<host2>/ado-mcp-proxy/oauth" ].
+#         App Gateway cannot rewrite bodies. oauth-prm.xml takes the host from the last
+#         X-Forwarded-Host entry because the named value mcp-trust-forwarded-for is true.
+#         With it false this shows <apim-name>.azure-api.net and clients reject the PRM.
+# @name b2prm
+GET {{agwHost2}}/ado-mcp-proxy/.well-known/oauth-protected-resource/{{org}}
+Accept: application/json
+
+###
+# STEP B3 - Authorization-server metadata on <host2>
+# EXPECT: HTTP 200, issuer https://<host2>/ado-mcp-proxy/oauth and every endpoint on <host2>.
+# @name b3asMetadata
+GET {{agwHost2}}/.well-known/oauth-authorization-server/ado-mcp-proxy/oauth
+Accept: application/json
+
+###
+# STEP B4 - Dynamic client registration on <host2>
+# EXPECT: HTTP 201 with the same client_id as step A4.
+# @name b4register
+POST {{b3asMetadata.response.body.$.registration_endpoint}}
+Content-Type: application/json
+
+{"client_name":"http-walkthrough-agw2","redirect_uris":["{{redirectUri}}"],"token_endpoint_auth_method":"none"}
+
+###
+# STEP B5 - Authorization request on <host2>
+# EXPECT: HTTP 302 to login.microsoftonline.com with resource=https%3A%2F%2Fmcp.dev.azure.com,
+#         the same as step A5. The host the client used never reaches Entra.
+# @name b5authorize
+# @no-redirect
+GET {{b3asMetadata.response.body.$.authorization_endpoint}}
+    ?client_id={{b4register.response.body.$.client_id}}
+    &response_type=code
+    &redirect_uri={{redirectUri}}
+    &scope=https%3A%2F%2Fmcp.dev.azure.com%2F.default
+    &resource={{mcpUrl2}}
+    &code_challenge={{codeChallenge}}
+    &code_challenge_method=S256
+    &state=walkthrough-agw2
+
+###
+# STEP B6 - tools/call on <host2>
+# EXPECT: HTTP 200, SSE with a project list. The token from either host works on both:
+#         its audience is Azure DevOps MCP, not a gateway host.
+# @name b6toolsCall
+POST {{mcpUrl2}}
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2025-06-18
+Authorization: Bearer {{bearer}}
+
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"core_list_projects","arguments":{"top":5}}}
+
+# -------------------------------------------------------------------------------------
+# PART C - what App Gateway does not let through
+# -------------------------------------------------------------------------------------
+
+###
+# STEP C1 - Forged X-Forwarded-Host
+# WHY   : The policies trust X-Forwarded-Host, so only App Gateway may set it. App Gateway
+#         replaces the client's value with the host the client connected to.
+# EXPECT: HTTP 200, "resource": "https://<host2>/ado-mcp-proxy/<org>" (not attacker.example).
+# @name c1forged
+GET {{agwHost2}}/ado-mcp-proxy/.well-known/oauth-protected-resource/{{org}}
+Accept: application/json
+X-Forwarded-Host: attacker.example
+
+###
+# STEP C2 - A path that is not an MCP path
+# EXPECT: HTTP 502 from App Gateway (ERRORINFO_EMPTY_BACKEND_POOL in appgw-access.kql).
+#         Other APIs on the APIM instance, including its status endpoint, stay unreachable.
+# @name c2unrouted
+GET {{agwHost}}/status-0123456789abcdef
+
+###
+# STEP C3 - Root OAuth metadata
+# EXPECT: HTTP 502. Nothing of this setup lives at the host root; clients that fall back
+#         there get App Gateway's 502 instead of APIM's 404 (APP-GATEWAY.md section 6).
+# @name c3rootMetadata
+GET {{agwHost}}/.well-known/oauth-authorization-server
+Accept: application/json
+
+###
+# STEP C4 - Regular (native) setup on <host2>: why only the working setup is usable there
+# EXPECT: HTTP 200 from APIM's built-in PRM:
+#           "resource": "https://<apim-name>.azure-api.net/ado-mcp-native/<org>"   <- internal host
+#           "authorization_servers": [ "https://login.microsoftonline.com/<tenant-id>/v2.0" ]
+#         APIM builds this document itself from its own host and ignores X-Forwarded-Host;
+#         App Gateway cannot rewrite bodies. Clients reject it (resource != their URL).
+#         On <host> the same document names <host>, and sign-in fails later at Entra with
+#         AADSTS9010010 (file 01).
+# @name c4nativePrm
+GET {{agwHost2}}/ado-mcp-native/.well-known/oauth-protected-resource/{{org}}
+Accept: application/json
